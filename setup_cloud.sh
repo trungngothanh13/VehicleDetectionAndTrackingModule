@@ -14,7 +14,7 @@ echo "=== Downloading YOLO26l model ==="
 python -c "from ultralytics import YOLO; YOLO('yolo26l.pt')"
 
 echo "=== Downloading BoT-SORT Re-ID weights ==="
-python -c "from boxmot import BotSort; from pathlib import Path; BotSort(reid_weights=Path('osnet_x0_25_msmt17.pt'), device='cuda', half=False)"
+python -c "from boxmot import BotSORT; from pathlib import Path; BotSORT(reid_weights=Path('osnet_x0_25_msmt17.pt'), device='cuda', half=False)"
 
 echo ""
 echo "=== Setup complete! ==="

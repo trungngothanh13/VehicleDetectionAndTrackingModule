@@ -1,14 +1,14 @@
 from pathlib import Path
 import numpy as np
 import supervision as sv
-from boxmot import BotSort
+from boxmot import BotSORT
 
 
 class VehicleTracker:
     def __init__(self, track_thresh, match_thresh, track_buffer, device='cuda'):
         # BoT-SORT: adds camera-motion compensation + Re-ID appearance features on top of ByteTrack's
         # IoU matching — significantly better for dense overlapping scenes (e.g. Vietnamese motorcycles)
-        self.tracker = BotSort(
+        self.tracker = BotSORT(
             reid_weights=Path('osnet_x0_25_msmt17.pt'),  # Lightweight Re-ID model (~1MB auto-downloaded)
             device=device,
             half=False,
