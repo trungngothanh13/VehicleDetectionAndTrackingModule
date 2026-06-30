@@ -28,6 +28,7 @@ class VehicleModel:
             imgsz=self.imgsz,
             persist=True,
             tracker='botsort.yaml',
+            half=True,       # FP16 inference — ~2x faster on L40/A100 tensor cores
             verbose=False,
         )
         result = results[0]

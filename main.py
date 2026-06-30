@@ -1,11 +1,36 @@
 import cv2
 import os
+import threading
+from queue import Queue
 from config import Config
 from vehicle_model import VehicleModel
 from visualizer import Visualizer
 from zone_checker import ZoneChecker
 from zone_drawer import ZoneDrawer
 from traffic_light_detector import TrafficLightDetector
+
+
+class FrameReader:
+    """
+    Reads video frames on a background thread so CPU decode never blocks GPU inference.
+    Keeps a small buffer of pre-decoded frames ready.
+    """
+    def __init__(self, cap, buffer_size=8):
+        self.cap = cap
+        self.queue = Queue(maxsize=buffer_size)
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread.start()
+
+    def _read_loop(self):
+        while True:
+            ret, frame = self.cap.read()
+            self.queue.put((ret, frame))
+            if not ret:
+                break
+
+    def read(self):
+        return self.queue.get()
+
 
 def process_video():
     config = Config()
@@ -47,10 +72,13 @@ def process_video():
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(config.OUTPUT_VIDEO, fourcc, fps, (width, height))
 
+    # FrameReader runs on a background thread — pre-fetches decoded frames so GPU
+    # never sits idle waiting for CPU to decode the next frame.
+    reader = FrameReader(cap)
     frame_count = 0
 
-    while cap.isOpened():
-        ret, frame = cap.read()
+    while True:
+        ret, frame = reader.read()
         if not ret:
             break
 
