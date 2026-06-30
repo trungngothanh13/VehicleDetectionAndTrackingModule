@@ -19,12 +19,14 @@ def process_video():
     detector = VehicleDetector(
         config.MODEL_NAME,
         config.DETECTION_CLASSES,
-        config.CONFIDENCE_THRESHOLD
+        config.CONFIDENCE_THRESHOLD,
+        config.IMGSZ
     )
     tracker = VehicleTracker(
         config.TRACK_THRESH,
         config.MATCH_THRESH,
-        config.TRACK_BUFFER
+        config.TRACK_BUFFER,
+        config.TRACKER_DEVICE
     )
     visualizer = Visualizer(config.DETECTION_CLASSES)
 
@@ -67,8 +69,8 @@ def process_video():
         # Detect configured vehicle classes
         detections = detector.detect(frame)
         
-        # Track detected vehicles
-        tracked = tracker.update(detections)
+        # Track detected vehicles (pass frame for BoT-SORT Re-ID appearance features)
+        tracked = tracker.update(detections, frame)
         
         # Detect traffic light state
         light_state = 'unknown'

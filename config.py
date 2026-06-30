@@ -1,7 +1,8 @@
 class Config:
     # Model settings
     MODEL_NAME = 'yolo26l.pt'  # Upgraded from yolov8l — +2.1 mAP, same T4 latency, NMS-free
-    CONFIDENCE_THRESHOLD = 0.30  # Lower threshold feeds more detections into ByteTrack low-conf recovery
+    CONFIDENCE_THRESHOLD = 0.30  # Lower threshold feeds more detections into BoT-SORT low-conf recovery
+    IMGSZ = 1280               # Higher resolution for detecting small/distant motorcycles (vs default 640)
     
     # COCO classes supported by the default YOLOv8 weights.
     # Requested classes: bicycle, car, motorcycle, bus, truck.
@@ -24,10 +25,11 @@ class Config:
     SHOW_LIVE_PREVIEW = False  # Must be False for headless server (no display)
     SAVE_OUTPUT_VIDEO = True
     
-    # Tracking settings
-    TRACK_THRESH = 0.35  # Detection confidence threshold for tracking
-    MATCH_THRESH = 0.6  # IOU threshold for matching detections to tracks
-    TRACK_BUFFER = 60   # Number of frames to keep lost tracks
+    # Tracking settings (BoT-SORT via BoxMOT)
+    TRACK_THRESH = 0.35   # High-conf threshold for initiating new tracks
+    MATCH_THRESH = 0.6    # IoU threshold for matching detections to existing tracks
+    TRACK_BUFFER = 60     # ~2s at 30fps — bikes often occlude each other briefly
+    TRACKER_DEVICE = 'cuda'  # 'cuda' on cloud GPU instance, 'cpu' for local testing
 
     # Zone settings
     ZONES_FILE = 'zones.json'
