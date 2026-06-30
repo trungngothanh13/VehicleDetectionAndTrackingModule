@@ -5,7 +5,7 @@
 set -e
 
 echo "=== Installing system dependencies ==="
-apt-get update -qq && apt-get install -y -qq ffmpeg libgl1
+sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg libgl1
 
 echo "=== Installing Python dependencies ==="
 pip install -q -r requirements.txt
