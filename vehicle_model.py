@@ -28,7 +28,7 @@ class VehicleModel:
             imgsz=self.imgsz,
             persist=True,
             tracker='botsort.yaml',
-            quantize='half',  # FP16 inference — ~2x faster on L40/A100 tensor cores (replaces deprecated half=True)
+            quantize='fp16',  # FP16 inference — faster on L40/A100 tensor cores
             verbose=False,
         )
         result = results[0]
