@@ -96,12 +96,12 @@
   "traffic_lights": [
     {
       "x": 570,
-      "y": 151,
+      "y": 148,
       "color": "green"
     },
     {
       "x": 570,
-      "y": 132,
+      "y": 130,
       "color": "red"
     }
   ]
