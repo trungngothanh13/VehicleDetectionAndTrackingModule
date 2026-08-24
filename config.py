@@ -18,8 +18,8 @@ class Config:
     VIOLATION_CLASS_IDS = set(DETECTION_CLASSES)
     
     # Video settings
-    INPUT_VIDEO = 'test_2.mp4'
-    OUTPUT_VIDEO = 'output_test_2.mp4'
+    INPUT_VIDEO = 'test_1.mp4'
+    OUTPUT_VIDEO = 'output_test_1.mp4'
     
     # Display settings
     SHOW_LIVE_PREVIEW = False  # Must be False for headless server (no display)
@@ -34,4 +34,4 @@ class Config:
 
     # Zone settings
     ZONES_FILE = 'zones.json'
-    ENABLE_ZONE_DRAWER = False  # Set True to draw zones, then exit
+    ENABLE_ZONE_DRAWER = True  # Set True to draw zones, then exit

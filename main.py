@@ -3,11 +3,7 @@ import os
 import threading
 from queue import Queue
 from config import Config
-from vehicle_model import VehicleModel
-from visualizer import Visualizer
-from zone_checker import ZoneChecker
 from zone_drawer import ZoneDrawer
-from traffic_light_detector import TrafficLightDetector
 
 
 class FrameReader:
@@ -38,6 +34,11 @@ def process_video():
     if config.ENABLE_ZONE_DRAWER:
         ZoneDrawer().draw_zones(config.INPUT_VIDEO)
         return
+
+    from vehicle_model import VehicleModel
+    from visualizer import Visualizer
+    from zone_checker import ZoneChecker
+    from traffic_light_detector import TrafficLightDetector
 
     model = VehicleModel(
         config.MODEL_NAME,

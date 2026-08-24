@@ -190,3 +190,8 @@ class ZoneDrawer:
     def save_zones(self, filepath):
         with open(filepath, 'w') as f:
             json.dump(self.zones, f, indent=2)
+
+
+if __name__ == '__main__':
+    from config import Config
+    ZoneDrawer().draw_zones(Config.INPUT_VIDEO)
