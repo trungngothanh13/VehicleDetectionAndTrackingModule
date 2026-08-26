@@ -10,10 +10,10 @@ tracker_type: bytetrack
 # =========================================================================
 with_reid: false
 
-# Tracking parameters
-track_high_thresh: 0.35  # High-confidence threshold for initiating new tracks
-track_low_thresh: 0.1    # Low-confidence threshold for second-stage recovery
-new_track_thresh: 0.35   # Threshold to initialize new tracks
-track_buffer: 60         # Frames to keep lost tracks alive (~2s at 30fps)
-match_thresh: 0.6        # IoU association threshold
-fuse_score: true         # Fuse detection confidence with motion score
+# Tracking parameters (Ultralytics defaults)
+track_high_thresh: 0.25  # First-stage match threshold (higher = cleaner, lower = more tracks)
+track_low_thresh: 0.1    # Second-stage match threshold for low-score recovery
+new_track_thresh: 0.25   # Min confidence to initialize a new track
+track_buffer: 30         # Frames to keep lost tracks alive
+match_thresh: 0.8        # Association similarity threshold (0.8 = standard lenient matching)
+fuse_score: true         # Fuse detection confidence with motion score for matching

@@ -44,7 +44,6 @@ class ByteTrackTracker(BaseTracker):
             imgsz=self.imgsz,
             persist=True,
             tracker=self.tracker_yaml,
-            quantize='fp16',
             verbose=False,
         )
         result = results[0]
