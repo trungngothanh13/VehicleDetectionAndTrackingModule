@@ -230,4 +230,5 @@ yolo26l.pt
 *.mov
 *.webm
 
-
+# Zone configurations
+zones.json

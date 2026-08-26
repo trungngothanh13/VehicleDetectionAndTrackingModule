@@ -73,4 +73,4 @@ class Config:
     # ZONE & TRAFFIC LIGHT SETTINGS
     # =========================================================================
     ZONES_FILE = 'zones.json'
-    ENABLE_ZONE_DRAWER = False  # Set True to run interactive zone drawer, then exit
+    ENABLE_ZONE_DRAWER = True  # Set True to run interactive zone drawer, then exit
