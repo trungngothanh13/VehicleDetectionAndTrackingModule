@@ -103,45 +103,36 @@ flowchart TD
 
 ## 🚀 How to Switch Models & Trackers
 
-In **[config.py](file:///home/trung/Projects/VehicleDetectionAndTrackingModule/config.py)**, set `TRACKER_TYPE` to your desired tracker:
+1. In **[config.py](file:///home/trung/Projects/VehicleDetectionAndTrackingModule/config.py)**, choose the active tracker:
+   ```python
+   # Options: 'botsort', 'bytetrack', 'deepsort'
+   TRACKER_TYPE = 'botsort'
+   ```
 
-```python
-# Select active tracker: 'botsort', 'bytetrack', or 'deepsort'
-TRACKER_TYPE = 'botsort'
+2. Each tracker has its own dedicated **YAML configuration file** inside its folder:
+   - **BoT-SORT**: [trackers/botsort/botsort.yaml](file:///home/trung/Projects/VehicleDetectionAndTrackingModule/trackers/botsort/botsort.yaml)
+   - **ByteTrack**: [trackers/bytetrack/bytetrack.yaml](file:///home/trung/Projects/VehicleDetectionAndTrackingModule/trackers/bytetrack/bytetrack.yaml)
+   - **DeepSORT**: [trackers/deepsort/deepsort.yaml](file:///home/trung/Projects/VehicleDetectionAndTrackingModule/trackers/deepsort/deepsort.yaml)
+
+### DeepSORT ReID Toggle ([trackers/deepsort/deepsort.yaml](file:///home/trung/Projects/VehicleDetectionAndTrackingModule/trackers/deepsort/deepsort.yaml))
+
+ReID visual embeddings are disabled by default (`use_reid: false`) for maximum FPS (fast IoU-only matching). You can toggle it on anytime:
+
+```yaml
+# Set to true to enable deep visual feature extraction
+use_reid: false
+
+# Tracking hyper-parameters
+max_age: 30                  # Max frames to keep lost tracks alive (~1s at 30fps)
+n_init: 3                    # Number of consecutive detections to confirm track
+max_cosine_distance: 0.4     # 0.4 for IoU-only, 0.2 for ReID
+nn_budget: null              # null for IoU-only, 100 for ReID
+
+# ReID Embedder (only active when use_reid: true)
+embedder: "mobilenet"        # 'mobilenet' or 'torchvision'
+half: true                   # FP16 ReID inference
+embedder_gpu: true           # GPU acceleration
 ```
-
-### Tracker Configurations
-
-- **BoT-SORT**:
-  ```python
-  BOTSORT_CONFIG = {
-      'tracker_yaml': 'botsort.yaml',
-      'track_thresh': 0.35,
-      'match_thresh': 0.6,
-      'track_buffer': 60,
-  }
-  ```
-- **ByteTrack**:
-  ```python
-  BYTETRACK_CONFIG = {
-      'tracker_yaml': 'bytetrack.yaml',
-      'track_thresh': 0.35,
-      'match_thresh': 0.6,
-      'track_buffer': 60,
-  }
-  ```
-- **DeepSORT**:
-  ```python
-  DEEPSORT_CONFIG = {
-      'max_age': 60,
-      'n_init': 3,
-      'max_cosine_distance': 0.2,
-      'nn_budget': 100,
-      'embedder': 'mobilenet',  # 'mobilenet' or None (for IoU-only)
-      'half': True,
-      'embedder_gpu': True,
-  }
-  ```
 
 ---
 

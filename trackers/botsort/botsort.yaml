@@ -1,0 +1,27 @@
+# BoT-SORT Tracker Configuration
+# Combines motion estimation, Global Motion Compensation (GMC), and low-confidence recovery
+
+tracker_type: botsort
+
+# =========================================================================
+# ReID TOGGLE (Disabled for speed)
+# Set to 'false' for fast motion + GMC tracking (no ReID model pass).
+# Set to 'true' to enable appearance feature embeddings.
+# =========================================================================
+with_reid: false
+
+# Tracking parameters
+track_high_thresh: 0.35  # High-confidence threshold for initiating new tracks
+track_low_thresh: 0.1    # Low-confidence threshold for second-stage recovery
+new_track_thresh: 0.35   # Threshold to initialize new tracks
+track_buffer: 60         # Frames to keep lost tracks alive (~2s at 30fps)
+match_thresh: 0.6        # IoU association threshold
+fuse_score: true         # Fuse detection confidence with motion score
+
+# Global Motion Compensation (GMC for camera sway/vibration)
+gmc_method: sparseOptFlow  # Options: sparseOptFlow | orb | sift | ecc | none
+
+# Appearance ReID settings (only active when with_reid: true)
+proximity_thresh: 0.5    # Min IoU to consider tracks proximate for ReID
+appearance_thresh: 0.8   # Min appearance similarity for ReID matching
+model: auto              # ReID model path or "auto"

@@ -1,0 +1,22 @@
+# DeepSORT Tracker Configuration
+# Supports fast IoU-only tracking as well as appearance-based Deep ReID
+
+tracker_type: deepsort
+
+# =========================================================================
+# ReID TOGGLE (Disabled by default for high FPS)
+# Set to 'false' for fast IoU-only Kalman tracking (no neural feature extraction).
+# Set to 'true' to enable deep appearance feature extraction (handles long occlusions).
+# =========================================================================
+use_reid: false
+
+# Tracking parameters
+max_age: 30                  # Max frames to keep lost tracks alive (~1s at 30fps)
+n_init: 3                    # Number of consecutive detections to confirm track
+max_cosine_distance: 0.4     # Cosine distance threshold (0.4 for IoU-only, 0.2 for ReID)
+nn_budget: null              # Feature gallery size (null for IoU-only, 100 for ReID)
+
+# Appearance ReID settings (only active when use_reid: true)
+embedder: "mobilenet"        # ReID embedder ('mobilenet' or 'torchvision')
+half: true                   # FP16 ReID inference for speed
+embedder_gpu: true           # Run ReID embedder on CUDA GPU if available

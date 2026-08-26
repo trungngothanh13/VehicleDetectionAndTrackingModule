@@ -1,0 +1,19 @@
+# ByteTrack Tracker Configuration
+# Ultra-fast 2-stage low-confidence association (motion & IoU-based)
+
+tracker_type: bytetrack
+
+# =========================================================================
+# ReID TOGGLE
+# ByteTrack operates on pure Kalman motion & 2-stage spatial IoU matching.
+# ReID is disabled for maximum FPS and throughput.
+# =========================================================================
+with_reid: false
+
+# Tracking parameters
+track_high_thresh: 0.35  # High-confidence threshold for initiating new tracks
+track_low_thresh: 0.1    # Low-confidence threshold for second-stage recovery
+new_track_thresh: 0.35   # Threshold to initialize new tracks
+track_buffer: 60         # Frames to keep lost tracks alive (~2s at 30fps)
+match_thresh: 0.6        # IoU association threshold
+fuse_score: true         # Fuse detection confidence with motion score

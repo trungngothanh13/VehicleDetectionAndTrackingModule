@@ -27,7 +27,11 @@ def create_tracker(config: Any) -> BaseTracker:
     Factory function to instantiate a tracker based on configuration.
     
     Supports:
-    - config.TRACKER_TYPE: 'botsort' (or 'botsort.yaml'), 'bytetrack' (or 'bytetrack.yaml'), 'deepsort'
+    - config.TRACKER_TYPE: 'botsort', 'bytetrack', 'deepsort'
+    Each tracker loads its detailed parameters from its respective YAML file:
+    - trackers/botsort/botsort.yaml
+    - trackers/bytetrack/bytetrack.yaml
+    - trackers/deepsort/deepsort.yaml
     """
     tracker_type = normalize_tracker_type(getattr(config, 'TRACKER_TYPE', 'botsort'))
     
@@ -39,7 +43,7 @@ def create_tracker(config: Any) -> BaseTracker:
 
     if tracker_type in ('botsort', 'botsort.yaml'):
         botsort_cfg = getattr(config, 'BOTSORT_CONFIG', {})
-        tracker_yaml = botsort_cfg.get('tracker_yaml', 'botsort.yaml')
+        tracker_yaml = botsort_cfg.get('tracker_yaml', None)
         return BotSortTracker(
             model_name=model_name,
             target_classes=target_classes,
@@ -50,7 +54,7 @@ def create_tracker(config: Any) -> BaseTracker:
 
     elif tracker_type in ('bytetrack', 'bytetrack.yaml'):
         bytetrack_cfg = getattr(config, 'BYTETRACK_CONFIG', {})
-        tracker_yaml = bytetrack_cfg.get('tracker_yaml', 'bytetrack.yaml')
+        tracker_yaml = bytetrack_cfg.get('tracker_yaml', None)
         return ByteTrackTracker(
             model_name=model_name,
             target_classes=target_classes,
@@ -62,19 +66,14 @@ def create_tracker(config: Any) -> BaseTracker:
     elif tracker_type == 'deepsort':
         deepsort_cfg = getattr(config, 'DEEPSORT_CONFIG', {})
         tracker_device = getattr(config, 'TRACKER_DEVICE', 'cuda')
-        embedder_gpu = deepsort_cfg.get('embedder_gpu', tracker_device == 'cuda')
         return DeepSortTracker(
             model_name=model_name,
             target_classes=target_classes,
             confidence_threshold=confidence_threshold,
             imgsz=imgsz,
-            max_age=deepsort_cfg.get('max_age', getattr(config, 'MAX_AGE', 60)),
-            n_init=deepsort_cfg.get('n_init', getattr(config, 'N_INIT', 3)),
-            max_cosine_distance=deepsort_cfg.get('max_cosine_distance', getattr(config, 'MAX_COSINE_DISTANCE', 0.2)),
-            nn_budget=deepsort_cfg.get('nn_budget', getattr(config, 'NN_BUDGET', 100)),
-            embedder=deepsort_cfg.get('embedder', getattr(config, 'EMBEDDER', 'mobilenet')),
-            half=deepsort_cfg.get('half', getattr(config, 'HALF', True)),
-            embedder_gpu=embedder_gpu,
+            tracker_yaml=deepsort_cfg.get('tracker_yaml', None),
+            embedder_gpu=(tracker_device == 'cuda'),
+            **{k: v for k, v in deepsort_cfg.items() if k != 'tracker_yaml'},
         )
 
     else:

@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import supervision as sv
 from ultralytics import YOLO
@@ -7,6 +8,7 @@ from trackers.base_tracker import BaseTracker
 class BotSortTracker(BaseTracker):
     """
     Vehicle Detection and Tracking using Ultralytics YOLO with built-in BoT-SORT.
+    Reads tracker parameters from `botsort.yaml`.
     """
 
     def __init__(
@@ -15,7 +17,7 @@ class BotSortTracker(BaseTracker):
         target_classes: dict = None,
         confidence_threshold: float = 0.30,
         imgsz: int = 1280,
-        tracker_yaml: str = 'botsort.yaml',
+        tracker_yaml: str = None,
         **kwargs,
     ):
         super().__init__(
@@ -25,6 +27,9 @@ class BotSortTracker(BaseTracker):
             imgsz=imgsz,
             **kwargs,
         )
+        if tracker_yaml is None:
+            local_yaml = os.path.join(os.path.dirname(__file__), 'botsort.yaml')
+            tracker_yaml = local_yaml if os.path.exists(local_yaml) else 'botsort.yaml'
         self.tracker_yaml = tracker_yaml
         self.model = YOLO(self.model_name)
 
