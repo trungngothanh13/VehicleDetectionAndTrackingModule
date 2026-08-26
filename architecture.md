@@ -2,7 +2,9 @@
 
 ## Overview
 
-A single-process, multi-threaded Python pipeline that reads a traffic video, runs YOLO26l detection + BoT-SORT tracking on every frame, classifies the traffic light state, checks for red-light violations, and writes an annotated output video.
+A modular, multi-threaded Python pipeline for traffic video analytics that reads video frames asynchronously, runs vehicle detection and tracking (supporting **BoT-SORT**, **ByteTrack**, and **DeepSORT**), classifies traffic light state, checks for lane-to-intersection red light violations, and exports an annotated video stream.
+
+---
 
 ## High-Level Data Flow
 
@@ -10,12 +12,12 @@ A single-process, multi-threaded Python pipeline that reads a traffic video, run
 Video File
   │
   ▼
-FrameReader (daemon thread, 8-frame queue)
+FrameReader (daemon thread, 8-frame buffer queue)
   │  decoded BGR frame
-  ├──────────────────────► VehicleModel (YOLO26l + BoT-SORT, FP16)
-  │                              │ sv.Detections (xyxy, class_id, tracker_id)
+  ├──────────────────────► BaseTracker (BoT-SORT / ByteTrack / DeepSORT)
+  │                              │ sv.Detections (xyxy, confidence, class_id, tracker_id)
   │                              ▼
-  └──────────────────────► TrafficLightDetector (HSV sampling + 3-frame vote)
+  └──────────────────────► TrafficLightDetector (HSV sliding kernel + majority vote)
                                  │ light state: red / green / unknown
                                  ▼
                            ZoneChecker (point-in-polygon)
@@ -27,29 +29,49 @@ FrameReader (daemon thread, 8-frame queue)
                            VideoWriter / Live Preview
 ```
 
+---
+
+## Modular Tracker Architecture
+
+All tracking algorithms reside in the `trackers/` package and implement a unified interface (`BaseTracker`):
+
+```
+trackers/
+├── __init__.py               # Factory function `create_tracker(config)` & registry
+├── base_tracker.py           # Abstract BaseTracker (interface, ID bookkeeping, class mappings)
+├── botsort/
+│   ├── __init__.py
+│   └── botsort_tracker.py    # Ultralytics YOLO with BoT-SORT (camera motion compensation)
+├── bytetrack/
+│   ├── __init__.py
+│   └── bytetrack_tracker.py  # Ultralytics YOLO with ByteTrack (high-speed association)
+└── deepsort/
+    ├── __init__.py
+    └── deepsort_tracker.py   # YOLO detector + DeepSORT (deep-sort-realtime appearance ReID)
+```
+
+---
+
 ## Modules
 
 | Module | Responsibility |
 |---|---|
-| **config.py** | All tunables: model weights, thresholds, I/O paths, tracker choice, display flags. |
+| **config.py** | Centralized configuration: `TRACKER_TYPE` ('botsort', 'bytetrack', 'deepsort'), model weights, hyperparams, video I/O, display options. |
+| **trackers/** | Modular tracker implementations inheriting from `BaseTracker` and instantiated via `create_tracker(config)`. |
+| **vehicle_model.py** | Backward-compatible wrapper delegating to `trackers/`. |
 | **main.py** | Pipeline orchestrator. Owns `FrameReader` (async decode thread) and the per-frame processing loop. |
-| **vehicle_model.py** | Wraps `ultralytics.YOLO.track()` with FP16, filters to target COCO classes, returns `supervision.Detections`. Tracks cumulative unique IDs. |
-| **traffic_light_detector.py** | Samples a 7×7 HSV region at user-defined red/green pixel coordinates. Uses majority-vote smoothing over 3 frames. |
-| **zone_checker.py** | Loads lane/intersection polygons from `zones.json`. Uses `cv2.pointPolygonTest` on the bottom-center of each bbox. Fires a violation when a vehicle transitions from a lane into the intersection while the light is red. |
-| **zone_drawer.py** | Interactive OpenCV GUI to define lane polygons, intersection polygon, and traffic-light sample points. Saves to `zones.json`. |
-| **visualizer.py** | Renders bounding boxes, tracker ID labels, zone overlays, and a statistics panel (vehicle count, violations, light state). |
+| **traffic_light_detector.py** | Samples HSV sub-patches around user-defined light coordinates using sliding kernel peak detection and majority voting. |
+| **zone_checker.py** | Loads lane/intersection polygons from `zones.json`. Uses `cv2.pointPolygonTest` on bottom-center of bounding boxes. Fires violations when entering intersection on red. |
+| **zone_drawer.py** | Interactive OpenCV tool to define lane polygons, intersection polygon, and traffic light coordinate points. |
+| **visualizer.py** | Renders bounding boxes, tracker ID labels, zone overlays, and HUD statistics panel. |
 
-## Key Design Decisions
+---
 
-- **Async frame decode** — `FrameReader` runs on a daemon thread with an 8-frame `Queue` so CPU video decoding never stalls GPU inference.
-- **Single-pass detect+track** — `model.track(persist=True)` keeps BoT-SORT state across frames in one call, avoiding a separate tracker step.
-- **FP16 inference** — `quantize='fp16'` for higher throughput on CUDA tensor cores.
-- **1280 px input resolution** — trades compute for accuracy on small/distant motorcycles in Vietnam traffic.
-- **Stateless violation logic** — `ZoneChecker` only stores two dicts (`_seen_in_lane`, `_violation_reported`) per vehicle ID; no complex FSM.
+## Switching Trackers
 
-## External Dependencies
+In `config.py`, change:
+```python
+TRACKER_TYPE = 'botsort'   # 'botsort' | 'bytetrack' | 'deepsort'
+```
 
-- `ultralytics` — YOLO26l model + BoT-SORT tracker
-- `supervision` — `sv.Detections` data container
-- `opencv-python` — video I/O, drawing, point-in-polygon tests
-- `numpy` — array ops
+Each tracker has its dedicated parameter section in `config.py` (`BOTSORT_CONFIG`, `BYTETRACK_CONFIG`, `DEEPSORT_CONFIG`).

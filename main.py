@@ -4,6 +4,7 @@ import threading
 from queue import Queue
 from config import Config
 from zone_drawer import ZoneDrawer
+from trackers import create_tracker
 
 
 class FrameReader:
@@ -35,18 +36,12 @@ def process_video():
         ZoneDrawer().draw_zones(config.INPUT_VIDEO)
         return
 
-    from vehicle_model import VehicleModel
     from visualizer import Visualizer
     from zone_checker import ZoneChecker
     from traffic_light_detector import TrafficLightDetector
 
-    model = VehicleModel(
-        config.MODEL_NAME,
-        config.DETECTION_CLASSES,
-        config.CONFIDENCE_THRESHOLD,
-        config.IMGSZ,
-        config.TRACKER_TYPE,
-    )
+    # Instantiate the selected tracker from config
+    tracker = create_tracker(config)
     visualizer = Visualizer(config.DETECTION_CLASSES)
 
     zone_checker = None
@@ -62,12 +57,18 @@ def process_video():
 
     # Open video
     cap = cv2.VideoCapture(config.INPUT_VIDEO)
+    if not cap.isOpened():
+        raise RuntimeError(f"Error opening video file: {config.INPUT_VIDEO}")
+
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    print(f"{'='*50}")
     print(f"Processing: {config.INPUT_VIDEO}")
-    print(f"Resolution: {width}x{height} @ {fps} FPS\n")
+    print(f"Resolution: {width}x{height} @ {fps} FPS")
+    print(f"Active Tracker: {config.TRACKER_TYPE.upper()} (Model: {config.MODEL_NAME})")
+    print(f"{'='*50}\n")
 
     out = None
     if config.SAVE_OUTPUT_VIDEO:
@@ -86,8 +87,8 @@ def process_video():
 
         frame_count += 1
 
-        # Detect + track in one pass (Ultralytics BoT-SORT)
-        tracked = model.track(frame)
+        # Detect + track using configured tracker
+        tracked = tracker.track(frame)
 
         # Traffic light state
         light_state = 'unknown'
@@ -95,7 +96,7 @@ def process_video():
             light_state = traffic_light_detector.detect(frame)
 
         # Draw detections
-        frame = visualizer.draw_detections(frame, tracked, model)
+        frame = visualizer.draw_detections(frame, tracked, tracker)
 
         # Zone violation checks
         if zone_checker and tracked.tracker_id is not None:
@@ -112,7 +113,7 @@ def process_video():
             frame = visualizer.draw_zones(frame, zone_checker.lanes, zone_checker.intersection)
 
         current_count = len(tracked) if tracked.tracker_id is not None else 0
-        total_tracked = model.get_total_tracked()
+        total_tracked = tracker.get_total_tracked()
 
         visualizer.set_violations_count(len(violations))
         visualizer.set_light_state(light_state)
@@ -139,7 +140,7 @@ def process_video():
     print(f"\n{'='*50}")
     print(f"Processing Complete!")
     print(f"Total frames: {frame_count}")
-    print(f"Total unique vehicles tracked: {model.get_total_tracked()}")
+    print(f"Total unique vehicles tracked: {tracker.get_total_tracked()}")
     if config.SAVE_OUTPUT_VIDEO:
         print(f"Output saved: {config.OUTPUT_VIDEO}")
     print(f"{'='*50}")
