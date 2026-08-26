@@ -106,7 +106,6 @@ class DeepSortTracker(BaseTracker):
             frame,
             conf=self.confidence_threshold,
             imgsz=self.imgsz,
-            quantize='fp16',
             verbose=False,
         )
         result = results[0]
@@ -143,13 +142,19 @@ class DeepSortTracker(BaseTracker):
         tracker_id_list = []
 
         for track in tracks:
-            if not track.is_confirmed():
+            # Only output tracks that are confirmed AND were matched/updated on the current frame
+            if not track.is_confirmed() or track.time_since_update > 0:
                 continue
+
             det_cls = track.get_det_class()
             if det_cls is None:
                 continue
 
-            ltrb = track.to_ltrb()
+            # orig=True returns the actual YOLO measurement bounding box for this frame
+            ltrb = track.to_ltrb(orig=True)
+            if ltrb is None:
+                continue
+
             track_id = int(track.track_id)
             det_conf = track.get_det_conf()
             conf = float(det_conf) if det_conf is not None else 1.0
