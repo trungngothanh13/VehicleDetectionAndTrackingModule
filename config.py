@@ -8,7 +8,7 @@ class Config:
     # - ByteTrack: trackers/bytetrack/bytetrack.yaml
     # - DeepSORT:  trackers/deepsort/deepsort.yaml (toggle use_reid: false/true)
     # =========================================================================
-    TRACKER_TYPE = 'botsort'
+    TRACKER_TYPE = 'bytetrack'
 
     # =========================================================================
     # GLOBAL MODEL & DETECTION SETTINGS
@@ -40,8 +40,8 @@ class Config:
     
     # Output directory & file paths
     OUTPUT_DIR = 'output'
-    OUTPUT_VIDEO = 'output/output_test_1.mp4'
-    VIOLATION_LOG = 'output/violations_test_1.txt'
+    OUTPUT_VIDEO = 'output/bytetrack_test_1.mp4'
+    VIOLATION_LOG = 'output/bytetrack_test_1.txt'
 
     # Output saving flags
     SAVE_OUTPUT_VIDEO = True
@@ -54,4 +54,4 @@ class Config:
     # ZONE & TRAFFIC LIGHT SETTINGS
     # =========================================================================
     ZONES_FILE = 'zones.json'
-    ENABLE_ZONE_DRAWER = False   # Set True to run interactive zone drawer, then exit
+    ENABLE_ZONE_DRAWER = True   # Set True to run interactive zone drawer, then exit
