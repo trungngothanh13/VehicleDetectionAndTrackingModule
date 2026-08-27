@@ -142,6 +142,9 @@ embedder_gpu: true           # GPU acceleration
 ```bash
 python main.py
 ```
+- Outputs are saved into the `output/` directory (created automatically).
+- **Annotated Video**: `output/output_<video_name>.mp4`
+- **Violation Report Log**: `output/violations_<video_name>.txt` (contains vehicle ID, frame number, timestamp, and vehicle class).
 
 ### 2. Interactive Zone Drawer GUI
 To configure lanes, intersection zones, and traffic lights:

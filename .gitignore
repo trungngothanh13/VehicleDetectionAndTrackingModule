@@ -232,3 +232,6 @@ yolo26l.pt
 
 # Zone configurations
 zones.json
+
+# Generated outputs
+output/

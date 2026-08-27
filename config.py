@@ -37,11 +37,18 @@ class Config:
     # VIDEO & I/O SETTINGS
     # =========================================================================
     INPUT_VIDEO = 'test_1.mp4'
-    OUTPUT_VIDEO = 'output_test_1.mp4'
+    
+    # Output directory & file paths
+    OUTPUT_DIR = 'output'
+    OUTPUT_VIDEO = 'output/output_test_1.mp4'
+    VIOLATION_LOG = 'output/violations_test_1.txt'
+
+    # Output saving flags
+    SAVE_OUTPUT_VIDEO = True
+    SAVE_VIOLATION_LOG = True
 
     # Display settings
     SHOW_LIVE_PREVIEW = False    # Must be False for headless cloud servers
-    SAVE_OUTPUT_VIDEO = True
 
     # =========================================================================
     # ZONE & TRAFFIC LIGHT SETTINGS
