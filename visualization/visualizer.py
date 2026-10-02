@@ -1,11 +1,10 @@
-# Handles drawing boxes, labels, zones, and statistics
-
 import cv2
 import numpy as np
+from typing import Dict, Set, Optional
 
 
 class Visualizer:
-    def __init__(self, tracked_classes):
+    def __init__(self, tracked_classes: Dict[int, str]):
         self.tracked_classes = tracked_classes
         # Vibrant, high-contrast BGR colors
         self.colors = {
@@ -32,7 +31,7 @@ class Visualizer:
         luminance = 0.299 * r + 0.587 * g + 0.114 * b
         return (0, 0, 0) if luminance > 135 else (255, 255, 255)
 
-    def draw_detections(self, frame, tracked_detections, detector, violation_ids=None):
+    def draw_detections(self, frame: np.ndarray, tracked_detections, detector, violation_ids: Optional[Set[int]] = None) -> np.ndarray:
         """Draw bounding boxes and high-contrast labels for tracked vehicles"""
         if tracked_detections.tracker_id is None or len(tracked_detections) == 0:
             return frame
@@ -86,7 +85,7 @@ class Visualizer:
 
         return frame
 
-    def draw_statistics(self, frame, current_count, total_tracked, frame_count):
+    def draw_statistics(self, frame: np.ndarray, current_count: int, total_tracked: int, frame_count: int) -> np.ndarray:
         """Draw compact statistics panel on top-left of frame"""
         fs = 0.40   # font scale
         pad = 8
@@ -113,21 +112,19 @@ class Visualizer:
 
         return frame
 
-    def set_violations_count(self, count):
+    def set_violations_count(self, count: int) -> None:
         self.violations_count = count
 
-    def set_light_state(self, state):
+    def set_light_state(self, state: str) -> None:
         self.light_state = state
 
-    def draw_zones(self, frame, lanes, intersection):
+    def draw_zones(self, frame: np.ndarray, lanes: list, intersection: list) -> np.ndarray:
         """Draw lanes and intersection on frame"""
-        # Draw lanes (Yellow outline)
         for lane in lanes:
             if len(lane) >= 3:
                 pts = np.array(lane, dtype=np.int32)
                 cv2.polylines(frame, [pts], True, (0, 255, 255), 2)
 
-        # Draw intersection (Cyan outline)
         if len(intersection) >= 3:
             pts = np.array(intersection, dtype=np.int32)
             cv2.polylines(frame, [pts], True, (255, 255, 0), 2)

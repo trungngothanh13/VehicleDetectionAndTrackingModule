@@ -1,193 +1,122 @@
-import cv2
 import os
-import threading
-from queue import Queue
-from config import Config
-from zone_drawer import ZoneDrawer
+import argparse
+from core.config import Config
+from core.pipeline import TrafficPipeline
+from ingestion import VideoFileReader, RTSPStreamReader
+from spatial import ZoneChecker
+from traffic_light import TrafficLightDetector
+from visualization import Visualizer
 from trackers import create_tracker
+from sinks import FileSink, WebSocketSink, PreviewSink
+from zone_drawer import ZoneDrawer
 
 
-class FrameReader:
-    """
-    Reads video frames on a background thread so CPU decode never blocks GPU inference.
-    Keeps a small buffer of pre-decoded frames ready.
-    """
-    def __init__(self, cap, buffer_size=8):
-        self.cap = cap
-        self.queue = Queue(maxsize=buffer_size)
-        self._thread = threading.Thread(target=self._read_loop, daemon=True)
-        self._thread.start()
-
-    def _read_loop(self):
-        while True:
-            ret, frame = self.cap.read()
-            self.queue.put((ret, frame))
-            if not ret:
-                break
-
-    def read(self):
-        return self.queue.get()
+def parse_args():
+    parser = argparse.ArgumentParser(description="VDAT: Vehicle Detection, Tracking, and Red-Light Violation Pipeline")
+    parser.add_argument("--input", "-i", type=str, default=None, help="Input video file path or RTSP stream URL")
+    parser.add_argument("--tracker", "-t", type=str, default=None, choices=["botsort", "bytetrack", "deepsort"], help="Tracking algorithm")
+    parser.add_argument("--model", "-m", type=str, default=None, help="Detector model weights file (e.g. yolo26l.pt)")
+    parser.add_argument("--max-frames", "-n", type=int, default=None, help="Limit number of frames to process (for fast testing)")
+    parser.add_argument("--preview", action="store_true", help="Display live OpenCV window preview")
+    parser.add_argument("--no-video", action="store_true", help="Disable saving output MP4 video")
+    parser.add_argument("--ws", action="store_true", help="Enable WebSocket streaming to api.VDAT")
+    parser.add_argument("--ws-url", type=str, default=None, help="WebSocket URL for api.VDAT backend")
+    parser.add_argument("--draw-zones", action="store_true", help="Launch interactive zone drawing GUI tool, then exit")
+    return parser.parse_args()
 
 
-def process_video():
+def main():
+    args = parse_args()
     config = Config()
 
+    # Apply CLI overrides to Config
+    if args.input:
+        config.INPUT_VIDEO = args.input
+    if args.tracker:
+        config.TRACKER_TYPE = args.tracker
+    if args.model:
+        config.MODEL_NAME = args.model
+    if args.preview:
+        config.SHOW_LIVE_PREVIEW = True
+    if args.no_video:
+        config.SAVE_OUTPUT_VIDEO = False
+    if args.ws:
+        config.ENABLE_WEBSOCKET_STREAM = True
+    if args.ws_url:
+        config.API_WS_URL = args.ws_url
+    if args.draw_zones:
+        config.ENABLE_ZONE_DRAWER = True
+    if args.max_frames is not None:
+        config.MAX_FRAMES = args.max_frames
+
+    # If zone drawer requested, run GUI tool and exit
     if config.ENABLE_ZONE_DRAWER:
         ZoneDrawer().draw_zones(config.INPUT_VIDEO)
         return
 
-    from visualizer import Visualizer
-    from zone_checker import ZoneChecker
-    from traffic_light_detector import TrafficLightDetector
+    # 1. Source Reader (File vs RTSP)
+    input_source = config.INPUT_VIDEO
+    is_live_stream = str(input_source).startswith(("rtsp://", "http://", "https://"))
 
-    # Ensure output directory exists
-    output_dir = getattr(config, 'OUTPUT_DIR', 'output')
-    os.makedirs(output_dir, exist_ok=True)
-    if config.SAVE_OUTPUT_VIDEO and os.path.dirname(config.OUTPUT_VIDEO):
-        os.makedirs(os.path.dirname(config.OUTPUT_VIDEO), exist_ok=True)
-    if getattr(config, 'SAVE_VIOLATION_LOG', True) and os.path.dirname(config.VIOLATION_LOG):
-        os.makedirs(os.path.dirname(config.VIOLATION_LOG), exist_ok=True)
+    if is_live_stream:
+        reader = RTSPStreamReader(input_source)
+    else:
+        if not os.path.exists(input_source):
+            raise FileNotFoundError(f"Input video file not found: {input_source}")
+        reader = VideoFileReader(input_source)
 
-    # Instantiate the selected tracker from config
+    # 2. Components
     tracker = create_tracker(config)
     visualizer = Visualizer(config.DETECTION_CLASSES)
 
+    # 3. Spatial & Light Detection
     zone_checker = None
-    traffic_light_detector = None
-    violations = set()
-    violation_records = []
-
+    light_detector = None
     if os.path.exists(config.ZONES_FILE):
-        import json
-        with open(config.ZONES_FILE, 'r') as f:
-            zones_data = json.load(f)
         zone_checker = ZoneChecker(config.ZONES_FILE)
-        if zones_data.get('traffic_lights') and len(zones_data['traffic_lights']) >= 2:
-            traffic_light_detector = TrafficLightDetector(zones_data['traffic_lights'])
+        light_detector = TrafficLightDetector.from_file(config.ZONES_FILE)
 
-    # Open video
-    cap = cv2.VideoCapture(config.INPUT_VIDEO)
-    if not cap.isOpened():
-        raise RuntimeError(f"Error opening video file: {config.INPUT_VIDEO}")
+    # 4. Sinks
+    sinks = []
 
-    fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # File Sink (MP4 video, snapshots, violation report)
+    file_sink = FileSink(
+        output_video_path=config.OUTPUT_VIDEO,
+        violation_log_path=config.VIOLATION_LOG,
+        evidence_dir=getattr(config, 'EVIDENCE_DIR', 'output/evidence'),
+        save_video=config.SAVE_OUTPUT_VIDEO,
+        save_log=config.SAVE_VIOLATION_LOG,
+        save_evidence=getattr(config, 'SAVE_EVIDENCE_SNAPSHOTS', True),
+    )
+    sinks.append(file_sink)
 
-    print(f"{'='*60}")
-    print(f"Processing:     {config.INPUT_VIDEO}")
-    print(f"Resolution:     {width}x{height} @ {fps} FPS")
-    print(f"Active Tracker: {config.TRACKER_TYPE.upper()} (Model: {config.MODEL_NAME})")
-    print(f"Output Video:   {config.OUTPUT_VIDEO if config.SAVE_OUTPUT_VIDEO else 'Disabled'}")
-    print(f"Violation Log:  {config.VIOLATION_LOG if getattr(config, 'SAVE_VIOLATION_LOG', True) else 'Disabled'}")
-    print(f"{'='*60}\n")
+    # Optional WebSocket Sink (api.VDAT streaming)
+    if config.ENABLE_WEBSOCKET_STREAM:
+        ws_sink = WebSocketSink(
+            ws_url=config.API_WS_URL,
+            camera_id=config.CAMERA_ID,
+            jpeg_quality=getattr(config, 'JPEG_QUALITY', 75),
+        )
+        sinks.append(ws_sink)
 
-    out = None
-    if config.SAVE_OUTPUT_VIDEO:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(config.OUTPUT_VIDEO, fourcc, fps, (width, height))
+    # Optional Desktop Preview Sink
+    if config.SHOW_LIVE_PREVIEW:
+        sinks.append(PreviewSink())
 
-    # FrameReader runs on a background thread
-    reader = FrameReader(cap)
-    frame_count = 0
+    # 5. Pipeline Execution
+    pipeline = TrafficPipeline(
+        reader=reader,
+        tracker=tracker,
+        visualizer=visualizer,
+        sinks=sinks,
+        config=config,
+        light_detector=light_detector,
+        zone_checker=zone_checker,
+        max_frames=config.MAX_FRAMES,
+    )
 
-    while True:
-        ret, frame = reader.read()
-        if not ret:
-            break
-
-        frame_count += 1
-
-        # Detect + track using configured tracker
-        tracked = tracker.track(frame)
-
-        # Traffic light state
-        light_state = 'unknown'
-        if traffic_light_detector:
-            light_state = traffic_light_detector.detect(frame)
-
-        # Zone violation checks
-        if zone_checker and tracked.tracker_id is not None:
-            light_is_red = (light_state == 'red')
-            for i in range(len(tracked)):
-                class_id = int(tracked.class_id[i])
-                if class_id not in config.VIOLATION_CLASS_IDS:
-                    continue
-                tracker_id = int(tracked.tracker_id[i])
-                bbox = tracked.xyxy[i]
-                if zone_checker.check_lane_to_intersection(tracker_id, bbox, light_is_red):
-                    if tracker_id not in violations:
-                        violations.add(tracker_id)
-                        class_name = tracker.get_class_name(class_id)
-                        timestamp_sec = f"{frame_count / fps:.2f}s"
-                        violation_records.append({
-                            'id': tracker_id,
-                            'frame': frame_count,
-                            'timestamp': timestamp_sec,
-                            'class': class_name
-                        })
-                        print(f"🚨 [VIOLATION] Vehicle #{tracker_id} ({class_name}) at Frame {frame_count} ({timestamp_sec})")
-
-            frame = visualizer.draw_zones(frame, zone_checker.lanes, zone_checker.intersection)
-
-        # Draw detections and violation status
-        frame = visualizer.draw_detections(frame, tracked, tracker, violation_ids=violations)
-
-        current_count = len(tracked) if tracked.tracker_id is not None else 0
-        total_tracked = tracker.get_total_tracked()
-
-        visualizer.set_violations_count(len(violations))
-        visualizer.set_light_state(light_state)
-        frame = visualizer.draw_statistics(frame, current_count, total_tracked, frame_count)
-
-        if out:
-            out.write(frame)
-
-        if config.SHOW_LIVE_PREVIEW:
-            cv2.imshow('Vehicle Tracking', frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("\nStopped by user")
-                break
-
-        if frame_count % 30 == 0:
-            print(f"Frame {frame_count}: Vehicles={current_count}, Tracked={total_tracked}, Violations={len(violations)}, Light={light_state}")
-
-    # Cleanup
-    cap.release()
-    if out:
-        out.release()
-    cv2.destroyAllWindows()
-
-    # Write violation report to .txt file
-    if getattr(config, 'SAVE_VIOLATION_LOG', True):
-        with open(config.VIOLATION_LOG, 'w') as f:
-            f.write("=" * 60 + "\n")
-            f.write("VEHICLE RED-LIGHT VIOLATION REPORT\n")
-            f.write("=" * 60 + "\n")
-            f.write(f"Input Video:      {config.INPUT_VIDEO}\n")
-            f.write(f"Active Tracker:   {config.TRACKER_TYPE}\n")
-            f.write(f"Detector Model:   {config.MODEL_NAME}\n")
-            f.write(f"Total Frames:     {frame_count} (FPS: {fps})\n")
-            f.write(f"Total Vehicles:   {tracker.get_total_tracked()}\n")
-            f.write(f"Total Violations: {len(violation_records)}\n")
-            f.write("=" * 60 + "\n")
-            f.write(f"{'Vehicle ID':<12} | {'Frame':<8} | {'Timestamp':<12} | {'Class':<12}\n")
-            f.write("-" * 60 + "\n")
-            for r in violation_records:
-                f.write(f"{r['id']:<12} | {r['frame']:<8} | {r['timestamp']:<12} | {r['class']:<12}\n")
-            f.write("=" * 60 + "\n")
-
-    print(f"\n{'='*60}")
-    print(f"Processing Complete!")
-    print(f"Total frames: {frame_count}")
-    print(f"Total unique vehicles tracked: {tracker.get_total_tracked()}")
-    print(f"Total violations logged: {len(violation_records)}")
-    if config.SAVE_OUTPUT_VIDEO:
-        print(f"Output video saved: {config.OUTPUT_VIDEO}")
-    if getattr(config, 'SAVE_VIOLATION_LOG', True):
-        print(f"Violation report saved: {config.VIOLATION_LOG}")
-    print(f"{'='*60}")
+    pipeline.run()
 
 
 if __name__ == "__main__":
-    process_video()
+    main()
