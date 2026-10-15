@@ -32,6 +32,8 @@ class ViolationEvent:
     confidence: Optional[float] = None
     created_at: float = field(default_factory=time.time)
     snapshot_path: Optional[str] = None
+    evidence_clip_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+

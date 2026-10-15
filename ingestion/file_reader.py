@@ -1,7 +1,7 @@
 import cv2
 import threading
 from queue import Queue
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Callable
 import numpy as np
 
 from ingestion.base_reader import BaseFrameReader
@@ -26,8 +26,14 @@ class VideoFileReader(BaseFrameReader):
 
         self.queue = Queue(maxsize=buffer_size)
         self._stopped = False
+        self._raw_consumer: Optional[Callable[[np.ndarray, int], None]] = None
+        self._frame_count = 0
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
+
+    def register_raw_consumer(self, consumer: Optional[Callable[[np.ndarray, int], None]]) -> None:
+        """Register a callback that receives every read raw frame."""
+        self._raw_consumer = consumer
 
     def _read_loop(self):
         while not self._stopped:
@@ -39,7 +45,15 @@ class VideoFileReader(BaseFrameReader):
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         if self._stopped and self.queue.empty():
             return False, None
-        return self.queue.get()
+        ret, frame = self.queue.get()
+        if ret and frame is not None:
+            self._frame_count += 1
+            if self._raw_consumer is not None:
+                try:
+                    self._raw_consumer(frame, self._frame_count)
+                except Exception as e:
+                    print(f"[FileReader] Error in raw consumer callback: {e}")
+        return ret, frame
 
     @property
     def fps(self) -> int:

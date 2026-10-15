@@ -17,7 +17,11 @@ class BaseSink(ABC):
         pass
 
     def on_violation(self, event: ViolationEvent, snapshot: np.ndarray) -> None:
-        """Called whenever a new red-light violation is confirmed."""
+        """Called whenever a new red-light violation is confirmed (instant alert with snapshot)."""
+        pass
+
+    def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:
+        """Called when the full evidence video clip for a violation has been encoded and saved."""
         pass
 
     def on_complete(self) -> None:

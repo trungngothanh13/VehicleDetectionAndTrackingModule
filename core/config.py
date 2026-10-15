@@ -41,6 +41,9 @@ class Config:
     # =========================================================================
     INPUT_VIDEO = os.getenv('INPUT_VIDEO', 'test_1.mp4')
     MAX_FRAMES = int(os.getenv('MAX_FRAMES', '0')) or None  # None = full video
+    SIMULATE_CAMERA = os.getenv('SIMULATE_CAMERA', 'False').lower() in ('true', '1', 't')
+    LOOP_VIDEO = os.getenv('LOOP_VIDEO', 'False').lower() in ('true', '1', 't')
+
     
     # Output directory & file paths
     OUTPUT_DIR = os.getenv('OUTPUT_DIR', 'output')
@@ -52,6 +55,11 @@ class Config:
     SAVE_OUTPUT_VIDEO = os.getenv('SAVE_OUTPUT_VIDEO', 'True').lower() in ('true', '1', 't')
     SAVE_VIOLATION_LOG = os.getenv('SAVE_VIOLATION_LOG', 'True').lower() in ('true', '1', 't')
     SAVE_EVIDENCE_SNAPSHOTS = True
+
+    # Evidence video clip settings
+    EVIDENCE_PRE_SECONDS = float(os.getenv('EVIDENCE_PRE_SECONDS', '3.0'))
+    EVIDENCE_POST_SECONDS = float(os.getenv('EVIDENCE_POST_SECONDS', '3.0'))
+    EVIDENCE_MODE = os.getenv('EVIDENCE_MODE', 'raw').lower()  # 'raw' (legal proof) or 'annotated'
 
     # Display settings
     SHOW_LIVE_PREVIEW = os.getenv('SHOW_LIVE_PREVIEW', 'False').lower() in ('true', '1', 't')

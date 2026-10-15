@@ -59,12 +59,16 @@ class FileSink(BaseSink):
     def on_violation(self, event: ViolationEvent, snapshot: np.ndarray) -> None:
         self._violations.append(event)
 
-        # Save snapshot image
+        # Save snapshot image (immediate thumbnail)
         if self.save_evidence and self.evidence_dir:
             filename = f"violation_{event.camera_id}_id{event.track_id}_f{event.frame_number}.jpg"
             filepath = os.path.join(self.evidence_dir, filename)
             cv2.imwrite(filepath, snapshot)
             event.snapshot_path = filepath
+
+    def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:
+        """Log the completed evidence video clip path."""
+        print(f"[FileSink] Evidence clip linked: {clip_path}")
 
     def on_complete(self) -> None:
         if self._writer is not None:
@@ -80,18 +84,26 @@ class FileSink(BaseSink):
         fps = self._pipeline_info.get('fps', 30)
 
         with open(self.violation_log_path, 'w') as f:
-            f.write("=" * 60 + "\n")
+            f.write("=" * 80 + "\n")
             f.write("VEHICLE RED-LIGHT VIOLATION REPORT\n")
-            f.write("=" * 60 + "\n")
+            f.write("=" * 80 + "\n")
             f.write(f"Input Video:      {self._pipeline_info.get('input_source', 'N/A')}\n")
             f.write(f"Active Tracker:   {self._pipeline_info.get('tracker_type', 'N/A')}\n")
             f.write(f"Detector Model:   {self._pipeline_info.get('model_name', 'N/A')}\n")
             f.write(f"Total Frames:     {total_frames} (FPS: {fps})\n")
             f.write(f"Total Vehicles:   {total_tracked}\n")
             f.write(f"Total Violations: {len(self._violations)}\n")
-            f.write("=" * 60 + "\n")
-            f.write(f"{'Vehicle ID':<12} | {'Frame':<8} | {'Timestamp':<12} | {'Class':<12}\n")
-            f.write("-" * 60 + "\n")
-            for r in self._violations:
-                f.write(f"{r.track_id:<12} | {r.frame_number:<8} | {r.timestamp:<12} | {r.vehicle_class:<12}\n")
-            f.write("=" * 60 + "\n")
+            f.write("=" * 80 + "\n\n")
+
+            for i, r in enumerate(self._violations, 1):
+                f.write(f"--- Violation #{i} ---\n")
+                f.write(f"  Vehicle ID:     {r.track_id}\n")
+                f.write(f"  Class:          {r.vehicle_class}\n")
+                f.write(f"  Frame:          {r.frame_number}\n")
+                f.write(f"  Timestamp:      {r.timestamp}\n")
+                f.write(f"  Confidence:     {r.confidence:.2f}\n" if r.confidence else "")
+                f.write(f"  Snapshot:       {r.snapshot_path or 'N/A'}\n")
+                f.write(f"  Evidence Clip:  {r.evidence_clip_path or 'N/A'}\n")
+                f.write("\n")
+
+            f.write("=" * 80 + "\n")

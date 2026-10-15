@@ -132,6 +132,19 @@ class WebSocketSink(BaseSink):
                     # Connection failed or disconnected; wait and retry
                     time.sleep(self.reconnect_interval)
 
+    def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:
+        """Notify the API that a full evidence video clip is ready."""
+        if not WEBSOCKETS_AVAILABLE or self._stopped:
+            return
+
+        message = {
+            "type": "evidence_clip_ready",
+            "cameraId": self.camera_id,
+            "event": event.to_dict(),
+            "clipPath": clip_path,
+        }
+        self._enqueue(message)
+
     def on_complete(self) -> None:
         self._stopped = True
         if self._thread and self._thread.is_alive():

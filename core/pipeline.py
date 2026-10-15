@@ -3,6 +3,7 @@ from typing import List, Optional, Set
 import numpy as np
 
 from core.events import FrameTelemetry, ViolationEvent
+from core.evidence_recorder import EvidenceRecorder
 from ingestion.base_reader import BaseFrameReader
 from spatial.zone_checker import ZoneChecker
 from traffic_light.traffic_light_detector import TrafficLightDetector
@@ -38,6 +39,7 @@ class TrafficPipeline:
 
         self.violations: Set[int] = set()
         self.violation_events: List[ViolationEvent] = []
+        self._evidence_recorder: Optional[EvidenceRecorder] = None
 
     def run(self) -> List[ViolationEvent]:
         """Runs the main inference loop across all frames until completion or max_frames."""
@@ -64,6 +66,32 @@ class TrafficPipeline:
         print(f"Active Sinks:     {[s.__class__.__name__ for s in self.sinks]}")
         print("=" * 60 + "\n")
 
+        # Initialize the evidence video clip recorder
+        evidence_dir = getattr(self.config, 'EVIDENCE_DIR', 'output/evidence')
+        pre_seconds = getattr(self.config, 'EVIDENCE_PRE_SECONDS', 3.0)
+        post_seconds = getattr(self.config, 'EVIDENCE_POST_SECONDS', 3.0)
+        evidence_mode = getattr(self.config, 'EVIDENCE_MODE', 'raw')
+
+        self._evidence_recorder = EvidenceRecorder(
+            fps=fps,
+            width=width,
+            height=height,
+            pre_seconds=pre_seconds,
+            post_seconds=post_seconds,
+            evidence_dir=evidence_dir,
+            on_clip_ready=self._on_evidence_clip_ready,
+        )
+
+        # In raw mode, hook directly into the ingestion reader so evidence records
+        # smooth, continuous camera footage at native camera FPS
+        self._raw_consumer_registered = False
+        if evidence_mode == 'raw' and hasattr(self.reader, 'register_raw_consumer'):
+            self.reader.register_raw_consumer(self._evidence_recorder.buffer_frame)
+            self._raw_consumer_registered = True
+            print(f"[Evidence] Hooked raw recorder into ingestion stream at native {fps} FPS")
+
+        print(f"Evidence Recorder: {pre_seconds}s pre + {post_seconds}s post = {pre_seconds + post_seconds}s clips (Mode: {evidence_mode})")
+
         # Notify all sinks of pipeline start
         for sink in self.sinks:
             sink.on_start(pipeline_info)
@@ -80,6 +108,9 @@ class TrafficPipeline:
                 ret, frame = self.reader.read()
                 if not ret or frame is None:
                     break
+
+                # Preserve clean, unannotated raw frame for evidence archive
+                raw_frame = frame.copy()
 
                 frame_count += 1
                 timestamp_sec = frame_count / fps
@@ -121,6 +152,8 @@ class TrafficPipeline:
                                     light_state=light_state,
                                     bbox=[float(c) for c in bbox],
                                     confidence=conf,
+                                    snapshot_path=None,
+                                    evidence_clip_path=None,
                                 )
                                 new_violations.append(event)
                                 self.violation_events.append(event)
@@ -139,12 +172,19 @@ class TrafficPipeline:
                 self.visualizer.set_light_state(light_state)
                 frame = self.visualizer.draw_statistics(frame, current_count, total_tracked, frame_count)
 
-                # 5. Dispatch violation events to sinks with annotated frame snapshot
+                # 5. Buffer frame for evidence (if not already hooked into reader)
+                if not self._raw_consumer_registered:
+                    frame_to_buffer = raw_frame if evidence_mode == 'raw' else frame
+                    self._evidence_recorder.buffer_frame(frame_to_buffer, frame_count)
+
+                # 6. Trigger evidence clip recording for new violations
                 for event in new_violations:
+                    self._evidence_recorder.trigger_clip(event)
+                    # Also dispatch the instant snapshot (annotated for operator clarity) to sinks
                     for sink in self.sinks:
                         sink.on_violation(event, frame.copy())
 
-                # 6. Dispatch frame and telemetry to all sinks
+                # 7. Dispatch frame and telemetry to all sinks
                 telemetry = FrameTelemetry(
                     frame_number=frame_count,
                     timestamp=timestamp_sec,
@@ -169,6 +209,10 @@ class TrafficPipeline:
                     print(f"Frame {frame_count}: Vehicles={current_count}, Tracked={total_tracked}, Violations={len(self.violations)}, Light={light_state} ({current_fps:.1f} FPS)")
 
         finally:
+            # Flush any in-progress evidence clips before shutting down
+            if self._evidence_recorder:
+                self._evidence_recorder.flush()
+
             self.reader.release()
             for sink in self.sinks:
                 sink.on_complete()
@@ -183,3 +227,12 @@ class TrafficPipeline:
         print("=" * 60)
 
         return self.violation_events
+
+    def _on_evidence_clip_ready(self, event: ViolationEvent, clip_path: str) -> None:
+        """
+        Callback from EvidenceRecorder when a clip has been fully encoded.
+        Dispatches the completed clip to all sinks that support it.
+        """
+        for sink in self.sinks:
+            if hasattr(sink, 'on_evidence_clip'):
+                sink.on_evidence_clip(event, clip_path)

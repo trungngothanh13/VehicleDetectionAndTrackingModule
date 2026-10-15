@@ -2,7 +2,7 @@ import os
 import argparse
 from core.config import Config
 from core.pipeline import TrafficPipeline
-from ingestion import VideoFileReader, RTSPStreamReader
+from ingestion import VideoFileReader, RTSPStreamReader, SimulatedCameraReader
 from spatial import ZoneChecker
 from traffic_light import TrafficLightDetector
 from visualization import Visualizer
@@ -21,6 +21,8 @@ def parse_args():
     parser.add_argument("--no-video", action="store_true", help="Disable saving output MP4 video")
     parser.add_argument("--ws", action="store_true", help="Enable WebSocket streaming to api.VDAT")
     parser.add_argument("--ws-url", type=str, default=None, help="WebSocket URL for api.VDAT backend")
+    parser.add_argument("--simulate-camera", "-s", action="store_true", help="Simulate live camera ingestion (real-time FPS pacing, frame dropping)")
+    parser.add_argument("--loop", action="store_true", help="Loop input video endlessly when simulating camera")
     parser.add_argument("--draw-zones", action="store_true", help="Launch interactive zone drawing GUI tool, then exit")
     return parser.parse_args()
 
@@ -44,6 +46,10 @@ def main():
         config.ENABLE_WEBSOCKET_STREAM = True
     if args.ws_url:
         config.API_WS_URL = args.ws_url
+    if args.simulate_camera:
+        config.SIMULATE_CAMERA = True
+    if args.loop:
+        config.LOOP_VIDEO = True
     if args.draw_zones:
         config.ENABLE_ZONE_DRAWER = True
     if args.max_frames is not None:
@@ -54,12 +60,17 @@ def main():
         ZoneDrawer().draw_zones(config.INPUT_VIDEO)
         return
 
-    # 1. Source Reader (File vs RTSP)
+    # 1. Source Reader (File vs RTSP vs Simulated Live Camera)
     input_source = config.INPUT_VIDEO
     is_live_stream = str(input_source).startswith(("rtsp://", "http://", "https://"))
 
     if is_live_stream:
         reader = RTSPStreamReader(input_source)
+    elif config.SIMULATE_CAMERA:
+        if not os.path.exists(input_source):
+            raise FileNotFoundError(f"Input video file not found: {input_source}")
+        print(f"[Ingestion] Simulating live camera from {input_source} (Loop: {config.LOOP_VIDEO})")
+        reader = SimulatedCameraReader(input_source, loop=config.LOOP_VIDEO)
     else:
         if not os.path.exists(input_source):
             raise FileNotFoundError(f"Input video file not found: {input_source}")

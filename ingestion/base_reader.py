@@ -42,3 +42,11 @@ class BaseFrameReader(ABC):
     def release(self) -> None:
         """Release any underlying hardware, threads, or OpenCV captures."""
         pass
+
+    def register_raw_consumer(self, consumer) -> None:
+        """
+        Optional hook: Register a callback to receive every raw frame captured
+        at native camera frame rate (e.g., for rolling evidence video clips).
+        """
+        pass
+
