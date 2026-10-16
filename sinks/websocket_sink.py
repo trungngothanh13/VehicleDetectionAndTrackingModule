@@ -43,6 +43,11 @@ class WebSocketSink(BaseSink):
         self._thread: Optional[threading.Thread] = None
         self._encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
 
+        # Derive HTTP upload URL from WebSocket URL (e.g. ws://... -> http://.../api/evidence/upload)
+        http_scheme = "https" if self.ws_url.startswith("wss://") else "http"
+        host_part = self.ws_url.split("://")[1].split("/")[0]
+        self._upload_url = f"{http_scheme}://{host_part}/api/evidence/upload"
+
         if not WEBSOCKETS_AVAILABLE:
             print("[WebSocketSink] Warning: 'websockets' package not available. WebSocket stream disabled.")
 
@@ -133,7 +138,7 @@ class WebSocketSink(BaseSink):
                     time.sleep(self.reconnect_interval)
 
     def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:
-        """Notify the API that a full evidence video clip is ready."""
+        """Notify the API and upload the full evidence video clip."""
         if not WEBSOCKETS_AVAILABLE or self._stopped:
             return
 
@@ -145,7 +150,36 @@ class WebSocketSink(BaseSink):
         }
         self._enqueue(message)
 
+        # Upload the physical MP4 clip file to backend in background thread
+        threading.Thread(
+            target=self._upload_clip_file,
+            args=(clip_path, event),
+            daemon=True
+        ).start()
+
+    def _upload_clip_file(self, clip_path: str, event: ViolationEvent) -> None:
+        import os
+        if not os.path.exists(clip_path):
+            return
+        try:
+            import requests
+            with open(clip_path, 'rb') as f:
+                files = {'file': (os.path.basename(clip_path), f, 'video/mp4')}
+                data = {
+                    'cameraId': self.camera_id,
+                    'trackId': event.track_id,
+                    'frameNumber': event.frame_number,
+                }
+                res = requests.post(self._upload_url, files=files, data=data, timeout=60)
+                if res.status_code in (200, 201):
+                    print(f"☁️ [WebSocketSink] Evidence video clip uploaded to backend: {os.path.basename(clip_path)}")
+                else:
+                    print(f"[WebSocketSink] Warning: Evidence upload returned {res.status_code}: {res.text}")
+        except Exception as e:
+            print(f"[WebSocketSink] Warning: Failed to upload clip {clip_path}: {e}")
+
     def on_complete(self) -> None:
         self._stopped = True
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+
