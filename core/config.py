@@ -75,4 +75,6 @@ class Config:
     # =========================================================================
     ENABLE_WEBSOCKET_STREAM = os.getenv('ENABLE_WEBSOCKET_STREAM', 'False').lower() in ('true', '1', 't')
     API_WS_URL = os.getenv('API_WS_URL', 'ws://localhost:5000/ws/inference')
-    JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', '75'))
+    JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', '65'))
+    STREAM_TARGET_FPS = float(os.getenv('STREAM_TARGET_FPS', '15.0'))
+    STREAM_MAX_WIDTH = int(os.getenv('STREAM_MAX_WIDTH', '960'))

@@ -107,7 +107,9 @@ def main():
         ws_sink = WebSocketSink(
             ws_url=config.API_WS_URL,
             camera_id=config.CAMERA_ID,
-            jpeg_quality=getattr(config, 'JPEG_QUALITY', 75),
+            jpeg_quality=getattr(config, 'JPEG_QUALITY', 65),
+            target_fps=getattr(config, 'STREAM_TARGET_FPS', 15.0),
+            max_width=getattr(config, 'STREAM_MAX_WIDTH', 960),
         )
         sinks.append(ws_sink)
 

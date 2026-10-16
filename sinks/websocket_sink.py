@@ -30,19 +30,25 @@ class WebSocketSink(BaseSink):
         self,
         ws_url: str = "ws://localhost:5000/ws/inference",
         camera_id: str = "cam-01",
-        jpeg_quality: int = 75,
-        queue_size: int = 30,
+        jpeg_quality: int = 65,
+        target_fps: float = 15.0,
+        max_width: int = 960,
+        queue_size: int = 2,
         reconnect_interval: int = 5,
     ):
         self.ws_url = ws_url
         self.camera_id = camera_id
         self.jpeg_quality = jpeg_quality
+        self.target_fps = target_fps
+        self.max_width = max_width
         self.reconnect_interval = reconnect_interval
 
         self._queue: Queue = Queue(maxsize=queue_size)
         self._stopped = False
         self._thread: Optional[threading.Thread] = None
         self._encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
+        self._last_frame_time = 0.0
+        self._min_frame_interval = 1.0 / self.target_fps if self.target_fps > 0 else 0.0
 
         # Derive HTTP upload URL from WebSocket URL (e.g. ws://... -> http://.../api/evidence/upload)
         http_scheme = "https" if self.ws_url.startswith("wss://") else "http"
@@ -77,8 +83,22 @@ class WebSocketSink(BaseSink):
         if not WEBSOCKETS_AVAILABLE or self._stopped:
             return
 
+        now = time.time()
+        # Throttle stream FPS to target_fps to prevent network congestion
+        if self._min_frame_interval > 0 and (now - self._last_frame_time) < self._min_frame_interval:
+            return
+        self._last_frame_time = now
+
+        # Downscale frame for lightweight live web preview
+        h, w = frame.shape[:2]
+        if self.max_width and w > self.max_width:
+            new_h = int(h * (self.max_width / w))
+            preview_frame = cv2.resize(frame, (self.max_width, new_h), interpolation=cv2.INTER_AREA)
+        else:
+            preview_frame = frame
+
         # Encode frame to JPEG
-        ret, buffer = cv2.imencode('.jpg', frame, self._encode_params)
+        ret, buffer = cv2.imencode('.jpg', preview_frame, self._encode_params)
         if not ret:
             return
 
@@ -108,15 +128,16 @@ class WebSocketSink(BaseSink):
 
     def _enqueue(self, message: Dict[str, Any]) -> None:
         try:
-            # If queue is full, drop oldest non-violation message to keep stream fresh
-            if self._queue.full():
+            # If queue is full, discard oldest frame so only the freshest frame is sent
+            while self._queue.full():
                 try:
                     dropped = self._queue.get_nowait()
-                    # Preserve violations; re-enqueue if it was a violation
-                    if dropped.get('type') == 'violation':
+                    # Always preserve violations & clip ready notifications
+                    if dropped.get('type') in ('violation', 'evidence_clip_ready'):
                         self._queue.put_nowait(dropped)
+                        break
                 except Empty:
-                    pass
+                    break
             self._queue.put_nowait(message)
         except Exception:
             pass
