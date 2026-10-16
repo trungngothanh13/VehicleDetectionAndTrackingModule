@@ -60,6 +60,7 @@ class Config:
     EVIDENCE_PRE_SECONDS = float(os.getenv('EVIDENCE_PRE_SECONDS', '3.0'))
     EVIDENCE_POST_SECONDS = float(os.getenv('EVIDENCE_POST_SECONDS', '3.0'))
     EVIDENCE_MODE = os.getenv('EVIDENCE_MODE', 'raw').lower()  # 'raw' (legal proof) or 'annotated'
+    ENABLE_EVIDENCE_SERVER = os.getenv('ENABLE_EVIDENCE_SERVER', 'False').lower() in ('true', '1', 't')
 
     # Display settings
     SHOW_LIVE_PREVIEW = os.getenv('SHOW_LIVE_PREVIEW', 'False').lower() in ('true', '1', 't')

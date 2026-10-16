@@ -110,16 +110,18 @@ def main():
             jpeg_quality=getattr(config, 'JPEG_QUALITY', 65),
             target_fps=getattr(config, 'STREAM_TARGET_FPS', 15.0),
             max_width=getattr(config, 'STREAM_MAX_WIDTH', 960),
+            evidence_dir=config.EVIDENCE_DIR,
         )
         sinks.append(ws_sink)
 
-        # Start evidence HTTP file server (always available, independent of WS)
-        evidence_port = int(os.getenv('EVIDENCE_SERVER_PORT', '8080'))
-        start_evidence_server(
-            port=evidence_port,
-            evidence_dir=config.EVIDENCE_DIR,
-            daemon=True,
-        )
+        # Optional legacy HTTP file server (disabled by default; on-demand WS upload is used instead)
+        if getattr(config, 'ENABLE_EVIDENCE_SERVER', False):
+            evidence_port = int(os.getenv('EVIDENCE_SERVER_PORT', '8080'))
+            start_evidence_server(
+                port=evidence_port,
+                evidence_dir=config.EVIDENCE_DIR,
+                daemon=True,
+            )
 
     # Optional Desktop Preview Sink
     if config.SHOW_LIVE_PREVIEW:

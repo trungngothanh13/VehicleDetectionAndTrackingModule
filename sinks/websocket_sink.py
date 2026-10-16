@@ -7,6 +7,7 @@ import threading
 from queue import Queue, Empty
 from typing import Dict, Any, Optional
 import numpy as np
+import requests
 
 try:
     import websockets.sync.client as ws_sync
@@ -35,6 +36,7 @@ class WebSocketSink(BaseSink):
         max_width: int = 960,
         queue_size: int = 2,
         reconnect_interval: int = 5,
+        evidence_dir: str = "output/evidence",
     ):
         self.ws_url = ws_url
         self.camera_id = camera_id
@@ -42,6 +44,7 @@ class WebSocketSink(BaseSink):
         self.target_fps = target_fps
         self.max_width = max_width
         self.reconnect_interval = reconnect_interval
+        self.evidence_dir = evidence_dir
 
         self._queue: Queue = Queue(maxsize=queue_size)
         self._stopped = False
@@ -142,12 +145,77 @@ class WebSocketSink(BaseSink):
         except Exception:
             pass
 
+    def _reader_loop(self, ws: Any) -> None:
+        """Background thread listening for incoming server commands (e.g. on-demand clip requests)."""
+        while not self._stopped:
+            try:
+                raw_msg = ws.recv(timeout=1.0)
+                if not raw_msg:
+                    continue
+                data = json.loads(raw_msg)
+                msg_type = data.get("type")
+
+                if msg_type == "request_clip_upload":
+                    filename = data.get("filename")
+                    if filename:
+                        t = threading.Thread(
+                            target=self._upload_clip_worker,
+                            args=(filename,),
+                            daemon=True
+                        )
+                        t.start()
+                elif msg_type == "camera_ack":
+                    print(f"[WebSocketSink] Server acknowledged camera '{self.camera_id}'")
+            except TimeoutError:
+                continue
+            except Exception:
+                # Connection dropped or closed; exit reader thread
+                break
+
+    def _upload_clip_worker(self, filename: str) -> None:
+        """Uploads a requested evidence clip to api.VDAT in the background without blocking streaming."""
+        candidates = [
+            os.path.join(self.evidence_dir, filename),
+            os.path.join("output", "evidence", filename),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output", "evidence", filename)),
+        ]
+        clip_path = None
+        for c in candidates:
+            if os.path.exists(c):
+                clip_path = c
+                break
+
+        if not clip_path:
+            print(f"[WebSocketSink] ⚠️ On-demand clip '{filename}' not found on disk")
+            return
+
+        print(f"[WebSocketSink] 📤 Uploading on-demand proof clip '{filename}' to {self._upload_url}...")
+        try:
+            with open(clip_path, "rb") as f:
+                files = {"file": (filename, f, "video/mp4")}
+                data = {"cameraId": self.camera_id}
+                res = requests.post(self._upload_url, files=files, data=data, timeout=60)
+                if res.status_code in (200, 201):
+                    print(f"[WebSocketSink] ✅ Proof clip '{filename}' uploaded successfully!")
+                else:
+                    print(f"[WebSocketSink] ❌ Proof upload failed ({res.status_code}): {res.text}")
+        except Exception as e:
+            print(f"[WebSocketSink] ❌ Error uploading proof clip '{filename}': {e}")
+
     def _worker_loop(self) -> None:
         """Background worker thread that manages the WebSocket client connection."""
         while not self._stopped:
             try:
                 with ws_sync.connect(self.ws_url) as ws:
                     print(f"[WebSocketSink] Connected to {self.ws_url}")
+
+                    # Start dedicated reader thread to listen for server commands
+                    reader_thread = threading.Thread(
+                        target=self._reader_loop,
+                        args=(ws,),
+                        daemon=True
+                    )
+                    reader_thread.start()
 
                     while not self._stopped:
                         try:
