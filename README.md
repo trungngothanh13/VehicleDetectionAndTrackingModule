@@ -33,11 +33,6 @@ python -c "from ultralytics import YOLO; YOLO('yolo26l.pt'); YOLO('yolov8l.pt')"
   python main.py -i test_2.mp4 -s --loop --ws --ws-url ws://localhost:5000/ws/inference --no-video
   ```
 
-* **Start Evidence HTTP Server (Port 8080)**:
-  ```bash
-  ./init/start_evidence_server.sh
-  ```
-
 * **Interactive Zone Drawer**:
   ```bash
   python main.py --draw-zones

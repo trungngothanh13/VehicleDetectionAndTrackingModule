@@ -9,7 +9,6 @@ from visualization import Visualizer
 from trackers import create_tracker
 from sinks import FileSink, WebSocketSink, PreviewSink
 from zone_drawer import ZoneDrawer
-from init.evidence_server import start_evidence_server
 
 
 def parse_args():
@@ -113,15 +112,6 @@ def main():
             evidence_dir=config.EVIDENCE_DIR,
         )
         sinks.append(ws_sink)
-
-        # Optional legacy HTTP file server (disabled by default; on-demand WS upload is used instead)
-        if getattr(config, 'ENABLE_EVIDENCE_SERVER', False):
-            evidence_port = int(os.getenv('EVIDENCE_SERVER_PORT', '8080'))
-            start_evidence_server(
-                port=evidence_port,
-                evidence_dir=config.EVIDENCE_DIR,
-                daemon=True,
-            )
 
     # Optional Desktop Preview Sink
     if config.SHOW_LIVE_PREVIEW:
