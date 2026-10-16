@@ -9,7 +9,7 @@ from visualization import Visualizer
 from trackers import create_tracker
 from sinks import FileSink, WebSocketSink, PreviewSink
 from zone_drawer import ZoneDrawer
-from evidence_server import start_evidence_server
+from init.evidence_server import start_evidence_server
 
 
 def parse_args():

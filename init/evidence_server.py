@@ -94,6 +94,12 @@ def start_evidence_server(port: int = 8080, evidence_dir: str = "output/evidence
     Returns:
         The HTTPServer instance (if daemon=True) or None (blocks forever if daemon=False).
     """
+    # If relative path not found in cwd, check project root relative to this file
+    if not os.path.isabs(evidence_dir) and not os.path.exists(evidence_dir):
+        candidate = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", evidence_dir))
+        if os.path.exists(candidate) or os.path.exists(os.path.dirname(candidate)):
+            evidence_dir = candidate
+
     os.makedirs(evidence_dir, exist_ok=True)
 
     handler = partial(EvidenceRequestHandler, evidence_dir=evidence_dir)

@@ -1,16 +1,20 @@
 #!/bin/bash
 # ThunderCompute setup script for VehicleDetectionAndTrackingModule
-# Run this once after SSHing into your instance: bash setup_cloud.sh
+# Run this once after SSHing into your instance: bash init/setup_cloud.sh
 
 set -e
+
+INIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$INIT_DIR/.." && pwd)"
 
 echo "=== Installing system dependencies ==="
 sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg libgl1
 
 echo "=== Installing Python dependencies ==="
-pip install -q -r requirements.txt
+pip install -q -r "$INIT_DIR/requirements.txt"
 
 echo "=== Downloading YOLO models ==="
+cd "$ROOT_DIR"
 python -c "from ultralytics import YOLO; YOLO('yolo26l.pt'); YOLO('yolov8l.pt')"
 
 echo ""
