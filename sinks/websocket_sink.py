@@ -127,10 +127,6 @@ class WebSocketSink(BaseSink):
                 with ws_sync.connect(self.ws_url) as ws:
                     print(f"[WebSocketSink] Connected to {self.ws_url}")
 
-                    # Spawn background receiver thread for on-demand fetch requests
-                    recv_thread = threading.Thread(target=self._recv_loop, args=(ws,), daemon=True)
-                    recv_thread.start()
-
                     while not self._stopped:
                         try:
                             msg = self._queue.get(timeout=0.5)
@@ -141,43 +137,6 @@ class WebSocketSink(BaseSink):
                 if not self._stopped:
                     # Connection failed or disconnected; wait and retry
                     time.sleep(self.reconnect_interval)
-
-    def _recv_loop(self, ws) -> None:
-        """Listens for on-demand clip fetch requests from the backend."""
-        import base64
-        while not self._stopped:
-            try:
-                raw_msg = ws.recv()
-                if not raw_msg:
-                    break
-                data = json.loads(raw_msg)
-
-                if data.get('type') == 'fetch_clip_request':
-                    req_id = data.get('requestId')
-                    filename = data.get('filename')
-                    print(f"📥 [WebSocketSink] Backend requested video clip on-demand: {filename}")
-
-                    # Find clip in output/evidence
-                    clip_path = os.path.join('output', 'evidence', filename)
-                    if os.path.exists(clip_path):
-                        with open(clip_path, 'rb') as f:
-                            b64_content = base64.b64encode(f.read()).decode('utf-8')
-                        self._enqueue({
-                            "type": "fetch_clip_response",
-                            "requestId": req_id,
-                            "filename": filename,
-                            "data": b64_content,
-                        })
-                        print(f"📤 [WebSocketSink] Sent on-demand video clip to backend ({filename})")
-                    else:
-                        self._enqueue({
-                            "type": "fetch_clip_response",
-                            "requestId": req_id,
-                            "filename": filename,
-                            "error": f"Clip file not found on ThunderCompute: {filename}",
-                        })
-            except Exception:
-                break
 
     def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:
         """Notify the API that an evidence clip is ready on ThunderCompute disk."""
