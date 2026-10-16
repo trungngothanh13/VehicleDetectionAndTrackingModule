@@ -103,7 +103,13 @@ def start_evidence_server(port: int = 8080, evidence_dir: str = "output/evidence
     os.makedirs(evidence_dir, exist_ok=True)
 
     handler = partial(EvidenceRequestHandler, evidence_dir=evidence_dir)
-    server = HTTPServer(("0.0.0.0", port), handler)
+    try:
+        server = HTTPServer(("0.0.0.0", port), handler)
+    except OSError as e:
+        if e.errno == 98:  # Address already in use
+            print(f"📦 [Evidence Server] Port {port} is already active. Reusing running evidence server.")
+            return None
+        raise
 
     print(f"📦 [Evidence Server] Serving evidence clips from '{evidence_dir}' on port {port}")
     print(f"📦 [Evidence Server] Health check: http://0.0.0.0:{port}/health")
