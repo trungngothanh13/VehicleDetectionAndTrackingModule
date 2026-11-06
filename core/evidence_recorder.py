@@ -188,12 +188,34 @@ class EvidenceRecorder:
         # Update event with the clip path
         event.evidence_clip_path = filepath
 
+        # Prune oldest temporary clips on local disk to prevent storage flooding (keep latest 30 clips)
+        self._prune_old_clips(max_clips=30)
+
         # Notify via callback
         if self.on_clip_ready:
             try:
                 self.on_clip_ready(event, filepath)
             except Exception as e:
                 print(f"[EvidenceRecorder] Callback error: {e}")
+
+    def _prune_old_clips(self, max_clips: int = 30) -> None:
+        """Keeps at most `max_clips` temporary MP4 evidence files in `self.evidence_dir`."""
+        try:
+            mp4_files = [
+                os.path.join(self.evidence_dir, f)
+                for f in os.listdir(self.evidence_dir)
+                if f.endswith(".mp4") and not f.endswith(".h264.mp4")
+            ]
+            if len(mp4_files) <= max_clips:
+                return
+            mp4_files.sort(key=lambda p: os.path.getmtime(p))
+            for stale_path in mp4_files[: len(mp4_files) - max_clips]:
+                try:
+                    os.remove(stale_path)
+                except OSError:
+                    pass
+        except Exception:
+            pass
 
 
 class _PendingClip:

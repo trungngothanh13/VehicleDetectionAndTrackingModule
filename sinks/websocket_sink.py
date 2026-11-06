@@ -299,7 +299,7 @@ class WebSocketSink(BaseSink):
                     time.sleep(self.reconnect_interval)
 
     def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:
-        """Notify the API that an evidence clip is ready and proactively upload it for instant streaming."""
+        """Notify api.VDAT that an evidence clip is ready. Uploaded on-demand when streamed by an officer."""
         if not WEBSOCKETS_AVAILABLE or self._stopped:
             return
 
@@ -312,14 +312,6 @@ class WebSocketSink(BaseSink):
             "clipPath": clip_path,
         }
         self._enqueue(message)
-
-        # Proactively push the encoded MP4 to api.VDAT in background so web clients can stream immediately
-        t = threading.Thread(
-            target=self._upload_clip_worker,
-            args=(filename, event.track_id, event.frame_number),
-            daemon=True,
-        )
-        t.start()
 
     def on_complete(self) -> None:
         self._stopped = True
