@@ -1,5 +1,7 @@
 import cv2
 import os
+import shutil
+import subprocess
 import threading
 from collections import deque
 from typing import Dict, Optional, List, Tuple, Callable
@@ -138,6 +140,43 @@ class EvidenceRecorder:
             writer.write(frame)
 
         writer.release()
+
+        # Transcode to browser-native H.264 (yuv420p + faststart) for seamless HTML5 <video> streaming
+        if shutil.which("ffmpeg"):
+            tmp_h264 = filepath + ".h264.mp4"
+            try:
+                res = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        "-i",
+                        filepath,
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "ultrafast",
+                        "-crf",
+                        "23",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
+                        tmp_h264,
+                    ],
+                    check=False,
+                    timeout=30,
+                )
+                if res.returncode == 0 and os.path.exists(tmp_h264):
+                    os.replace(tmp_h264, filepath)
+            except Exception as e:
+                print(f"[EvidenceRecorder] H.264 faststart conversion warning: {e}")
+                if os.path.exists(tmp_h264):
+                    try:
+                        os.remove(tmp_h264)
+                    except OSError:
+                        pass
 
         total_frames = len(clip.pre_buffer) + len(clip.post_buffer)
         duration = total_frames / self.fps if self.fps > 0 else 0

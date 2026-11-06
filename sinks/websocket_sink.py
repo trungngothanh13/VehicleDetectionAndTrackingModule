@@ -37,6 +37,11 @@ class WebSocketSink(BaseSink):
         queue_size: int = 2,
         reconnect_interval: int = 5,
         evidence_dir: str = "output/evidence",
+        zones_file: str = "zones.json",
+        on_zone_update: Optional[ Any ] = None,
+        on_ingest_frame: Optional[ Any ] = None,
+        on_switch_source: Optional[ Any ] = None,
+        ingest_mode: str = "local",
     ):
         self.ws_url = ws_url
         self.camera_id = camera_id
@@ -45,6 +50,12 @@ class WebSocketSink(BaseSink):
         self.max_width = max_width
         self.reconnect_interval = reconnect_interval
         self.evidence_dir = evidence_dir
+        self.zones_file = zones_file
+        self.on_zone_update = on_zone_update
+        self.on_ingest_frame = on_ingest_frame
+        self.on_switch_source = on_switch_source
+        self.ingest_mode = ingest_mode
+        self._pipeline_info: Dict[str, Any] = {}
 
         self._queue: Queue = Queue(maxsize=queue_size)
         self._stopped = False
@@ -65,6 +76,7 @@ class WebSocketSink(BaseSink):
         if not WEBSOCKETS_AVAILABLE:
             return
 
+        self._pipeline_info = pipeline_info
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._thread.start()
 
@@ -72,12 +84,14 @@ class WebSocketSink(BaseSink):
         self._enqueue({
             "type": "camera_init",
             "cameraId": self.camera_id,
+            "ingestMode": self.ingest_mode,
             "pipeline": {
                 "tracker": pipeline_info.get("tracker_type"),
                 "model": pipeline_info.get("model_name"),
                 "fps": pipeline_info.get("fps"),
                 "width": pipeline_info.get("width"),
                 "height": pipeline_info.get("height"),
+                "ingestMode": self.ingest_mode,
             },
             "timestamp": time.time(),
         })
@@ -166,14 +180,66 @@ class WebSocketSink(BaseSink):
                         t.start()
                 elif msg_type == "camera_ack":
                     print(f"[WebSocketSink] Server acknowledged camera '{self.camera_id}'")
+                    zones = data.get("zones")
+                    if zones:
+                        self._apply_remote_zones(zones, source="camera_ack")
+                elif msg_type == "zone_update":
+                    zones = data.get("zones")
+                    if zones:
+                        self._apply_remote_zones(zones, source="zone_update")
+                elif msg_type == "ingest_frame":
+                    b64_img = data.get("image")
+                    if b64_img and callable(self.on_ingest_frame):
+                        try:
+                            raw_bytes = base64.b64decode(b64_img)
+                            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+                            decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                            if decoded is not None:
+                                self.on_ingest_frame(decoded)
+                        except Exception:
+                            pass
+                elif msg_type == "switch_source":
+                    if callable(self.on_switch_source):
+                        try:
+                            self.on_switch_source(data)
+                        except Exception as e:
+                            print(f"[WebSocketSink] Error switching source: {e}")
             except TimeoutError:
                 continue
             except Exception:
                 # Connection dropped or closed; exit reader thread
                 break
 
-    def _upload_clip_worker(self, filename: str) -> None:
-        """Uploads a requested evidence clip to api.VDAT in the background without blocking streaming."""
+    def _apply_remote_zones(self, zones_cfg: Dict[str, Any], source: str = "remote") -> None:
+        """Persists updated zones from api.VDAT to disk and triggers live reload."""
+        try:
+            lanes = zones_cfg.get("lanes") or []
+            intersection = zones_cfg.get("intersection") or []
+            light_box = zones_cfg.get("lightBox") or zones_cfg.get("traffic_lights") or []
+            payload = {
+                "lanes": lanes,
+                "intersection": intersection,
+                "traffic_lights": light_box if isinstance(light_box, list) else [],
+            }
+            with open(self.zones_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            print(
+                f"[WebSocketSink] Synced zones from {source}: "
+                f"{len(lanes)} lane(s), {len(intersection)} intersection pts, "
+                f"{len(payload['traffic_lights'])} light point(s)"
+            )
+            if callable(self.on_zone_update):
+                self.on_zone_update(self.zones_file)
+        except Exception as e:
+            print(f"[WebSocketSink] Failed to apply remote zones: {e}")
+
+    def _upload_clip_worker(
+        self,
+        filename: str,
+        track_id: Optional[int] = None,
+        frame_number: Optional[int] = None,
+    ) -> None:
+        """Uploads a requested or newly encoded evidence clip to api.VDAT in the background."""
         candidates = [
             os.path.join(self.evidence_dir, filename),
             os.path.join("output", "evidence", filename),
@@ -186,21 +252,25 @@ class WebSocketSink(BaseSink):
                 break
 
         if not clip_path:
-            print(f"[WebSocketSink] ⚠️ On-demand clip '{filename}' not found on disk")
+            print(f"[WebSocketSink] Clip '{filename}' not found on disk")
             return
 
-        print(f"[WebSocketSink] 📤 Uploading on-demand proof clip '{filename}' to {self._upload_url}...")
+        print(f"[WebSocketSink] Uploading evidence clip '{filename}' to {self._upload_url}...")
         try:
             with open(clip_path, "rb") as f:
                 files = {"file": (filename, f, "video/mp4")}
-                data = {"cameraId": self.camera_id}
+                data: Dict[str, Any] = {"cameraId": self.camera_id}
+                if track_id is not None:
+                    data["trackId"] = str(track_id)
+                if frame_number is not None:
+                    data["frameNumber"] = str(frame_number)
                 res = requests.post(self._upload_url, files=files, data=data, timeout=60)
                 if res.status_code in (200, 201):
-                    print(f"[WebSocketSink] ✅ Proof clip '{filename}' uploaded successfully!")
+                    print(f"[WebSocketSink] Evidence clip '{filename}' synced for streaming.")
                 else:
-                    print(f"[WebSocketSink] ❌ Proof upload failed ({res.status_code}): {res.text}")
+                    print(f"[WebSocketSink] Evidence upload failed ({res.status_code}): {res.text}")
         except Exception as e:
-            print(f"[WebSocketSink] ❌ Error uploading proof clip '{filename}': {e}")
+            print(f"[WebSocketSink] Error uploading evidence clip '{filename}': {e}")
 
     def _worker_loop(self) -> None:
         """Background worker thread that manages the WebSocket client connection."""
@@ -229,18 +299,27 @@ class WebSocketSink(BaseSink):
                     time.sleep(self.reconnect_interval)
 
     def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:
-        """Notify the API that an evidence clip is ready on ThunderCompute disk."""
+        """Notify the API that an evidence clip is ready and proactively upload it for instant streaming."""
         if not WEBSOCKETS_AVAILABLE or self._stopped:
             return
 
+        filename = os.path.basename(clip_path)
         message = {
             "type": "evidence_clip_ready",
             "cameraId": self.camera_id,
             "event": event.to_dict(),
-            "filename": os.path.basename(clip_path),
+            "filename": filename,
             "clipPath": clip_path,
         }
         self._enqueue(message)
+
+        # Proactively push the encoded MP4 to api.VDAT in background so web clients can stream immediately
+        t = threading.Thread(
+            target=self._upload_clip_worker,
+            args=(filename, event.track_id, event.frame_number),
+            daemon=True,
+        )
+        t.start()
 
     def on_complete(self) -> None:
         self._stopped = True

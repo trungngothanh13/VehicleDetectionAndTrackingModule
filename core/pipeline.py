@@ -40,6 +40,21 @@ class TrafficPipeline:
         self.violations: Set[int] = set()
         self.violation_events: List[ViolationEvent] = []
         self._evidence_recorder: Optional[EvidenceRecorder] = None
+        self._pending_reader: Optional[BaseFrameReader] = None
+
+    def reload_zones(self, zones_file: str) -> None:
+        """Dynamically reloads ZoneChecker and TrafficLightDetector when zones are updated remotely."""
+        try:
+            self.zone_checker = ZoneChecker(zones_file)
+            self.light_detector = TrafficLightDetector.from_file(zones_file)
+            print(f"[Pipeline] Dynamically reloaded zones and traffic light points from {zones_file}")
+        except Exception as e:
+            print(f"[Pipeline] Error reloading zones from {zones_file}: {e}")
+
+    def request_reader_switch(self, new_reader: BaseFrameReader, source_label: str = "new source") -> None:
+        """Queues a hot-swap of the active frame ingestion reader without restarting YOLO/ByteTrack."""
+        print(f"[Pipeline] Queued hot-switch to camera input source: {source_label}")
+        self._pending_reader = new_reader
 
     def run(self) -> List[ViolationEvent]:
         """Runs the main inference loop across all frames until completion or max_frames."""
@@ -101,12 +116,31 @@ class TrafficPipeline:
 
         try:
             while True:
+                if self._pending_reader is not None:
+                    old_reader = self.reader
+                    self.reader = self._pending_reader
+                    self._pending_reader = None
+                    try:
+                        old_reader.release()
+                    except Exception:
+                        pass
+                    self._raw_consumer_registered = False
+                    if evidence_mode == 'raw' and hasattr(self.reader, 'register_raw_consumer') and self._evidence_recorder:
+                        self.reader.register_raw_consumer(self._evidence_recorder.buffer_frame)
+                        self._raw_consumer_registered = True
+                    fps = self.reader.fps or 30
+                    frame_count = 0
+                    start_time = time.time()
+                    print(f"[Pipeline] Switched active camera source ({self.reader.width}x{self.reader.height} @ {fps} FPS)")
+
                 if self.max_frames and frame_count >= self.max_frames:
                     print(f"\n[Pipeline] Reached configured max_frames ({self.max_frames}). Stopping.")
                     break
 
                 ret, frame = self.reader.read()
                 if not ret or frame is None:
+                    if self._pending_reader is not None:
+                        continue
                     break
 
                 # Preserve clean, unannotated raw frame for evidence archive
