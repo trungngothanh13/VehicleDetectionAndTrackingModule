@@ -245,10 +245,15 @@ def main():
             loop_flag = bool(cmd.get("loop", True))
 
             if source_type in ("web_stream", "ws", "laptop_webcam_web", "custom_video_web"):
-                new_ws_reader = WebSocketFrameReader(width=854, height=480, fps=30)
-                ws_sink.on_ingest_frame = new_ws_reader.push_frame
-                ws_sink.ingest_mode = "ws"
-                pipeline.request_reader_switch(new_ws_reader, f"Web-Fed Stream ({source_val})")
+                if isinstance(pipeline.reader, WebSocketFrameReader) and pipeline._pending_reader is None:
+                    ws_sink.on_ingest_frame = pipeline.reader.push_frame
+                    ws_sink.ingest_mode = "ws"
+                    print(f"🎬 [AI Source] Active WebSocketFrameReader ready for Web-Fed Stream: {source_val}")
+                else:
+                    new_ws_reader = WebSocketFrameReader(width=854, height=480, fps=30)
+                    ws_sink.on_ingest_frame = new_ws_reader.push_frame
+                    ws_sink.ingest_mode = "ws"
+                    pipeline.request_reader_switch(new_ws_reader, f"Web-Fed Stream ({source_val})")
             elif source_type in ("webcam", "laptop_webcam_host"):
                 dev = source_val if source_val else "0"
                 ws_sink.on_ingest_frame = None

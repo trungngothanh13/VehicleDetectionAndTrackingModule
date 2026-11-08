@@ -45,16 +45,27 @@ class TrafficPipeline:
     def reload_zones(self, zones_file: str) -> None:
         """Dynamically reloads ZoneChecker and TrafficLightDetector when zones are updated remotely."""
         try:
-            self.zone_checker = ZoneChecker(zones_file)
-            self.light_detector = TrafficLightDetector.from_file(zones_file)
-            print(f"[Pipeline] Dynamically reloaded zones and traffic light points from {zones_file}")
+            new_zone_checker = ZoneChecker(zones_file)
+            new_light_detector = TrafficLightDetector.from_file(zones_file)
+            self.zone_checker = new_zone_checker
+            self.light_detector = new_light_detector
+            print(
+                f"🔄 [AI Zones] Applied live zone update from {zones_file}: "
+                f"{len(new_zone_checker.lanes)} lane(s), "
+                f"{len(new_zone_checker.intersection)} intersection pts, "
+                f"{len(new_light_detector.traffic_lights)} traffic light point(s)"
+            )
         except Exception as e:
             print(f"[Pipeline] Error reloading zones from {zones_file}: {e}")
 
     def request_reader_switch(self, new_reader: BaseFrameReader, source_label: str = "new source") -> None:
         """Queues a hot-swap of the active frame ingestion reader without restarting YOLO/ByteTrack."""
-        print(f"[Pipeline] Queued hot-switch to camera input source: {source_label}")
+        print(f"🎬 [Pipeline] Queued hot-switch to camera input source: {source_label}")
         self._pending_reader = new_reader
+        try:
+            self.reader.release()
+        except Exception:
+            pass
 
     def run(self) -> List[ViolationEvent]:
         """Runs the main inference loop across all frames until completion or max_frames."""
@@ -195,7 +206,13 @@ class TrafficPipeline:
 
                 # 4. Drawing & HUD Visualization
                 if self.zone_checker:
-                    frame = self.visualizer.draw_zones(frame, self.zone_checker.lanes, self.zone_checker.intersection)
+                    lights = self.light_detector.traffic_lights if self.light_detector else None
+                    frame = self.visualizer.draw_zones(
+                        frame,
+                        self.zone_checker.lanes,
+                        self.zone_checker.intersection,
+                        lights,
+                    )
 
                 frame = self.visualizer.draw_detections(frame, tracked, self.tracker, violation_ids=self.violations)
 

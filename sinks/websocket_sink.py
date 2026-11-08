@@ -63,6 +63,8 @@ class WebSocketSink(BaseSink):
         self._encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
         self._last_frame_time = 0.0
         self._min_frame_interval = 1.0 / self.target_fps if self.target_fps > 0 else 0.0
+        self._ingested_frames = 0
+        self._sent_frames = 0
 
         # Derive HTTP upload URL from WebSocket URL (e.g. ws://... -> http://.../api/evidence/upload)
         http_scheme = "https" if self.ws_url.startswith("wss://") else "http"
@@ -72,16 +74,9 @@ class WebSocketSink(BaseSink):
         if not WEBSOCKETS_AVAILABLE:
             print("[WebSocketSink] Warning: 'websockets' package not available. WebSocket stream disabled.")
 
-    def on_start(self, pipeline_info: Dict[str, Any]) -> None:
-        if not WEBSOCKETS_AVAILABLE:
-            return
-
-        self._pipeline_info = pipeline_info
-        self._thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self._thread.start()
-
-        # Send handshake / start packet
-        self._enqueue({
+    def _build_camera_init_packet(self) -> Dict[str, Any]:
+        pipeline_info = self._pipeline_info or {}
+        return {
             "type": "camera_init",
             "cameraId": self.camera_id,
             "ingestMode": self.ingest_mode,
@@ -94,7 +89,15 @@ class WebSocketSink(BaseSink):
                 "ingestMode": self.ingest_mode,
             },
             "timestamp": time.time(),
-        })
+        }
+
+    def on_start(self, pipeline_info: Dict[str, Any]) -> None:
+        if not WEBSOCKETS_AVAILABLE:
+            return
+
+        self._pipeline_info = pipeline_info
+        self._thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self._thread.start()
 
     def on_frame(self, frame: np.ndarray, telemetry: FrameTelemetry) -> None:
         if not WEBSOCKETS_AVAILABLE or self._stopped:
@@ -179,26 +182,52 @@ class WebSocketSink(BaseSink):
                         )
                         t.start()
                 elif msg_type == "camera_ack":
-                    print(f"[WebSocketSink] Server acknowledged camera '{self.camera_id}'")
+                    print(
+                        f"✅ [AI Engine] Registered with api.VDAT for camera '{self.camera_id}' "
+                        f"(ingest_mode={self.ingest_mode})"
+                    )
                     zones = data.get("zones")
                     if zones:
                         self._apply_remote_zones(zones, source="camera_ack")
                 elif msg_type == "zone_update":
                     zones = data.get("zones")
-                    if zones:
+                    if zones is not None:
                         self._apply_remote_zones(zones, source="zone_update")
                 elif msg_type == "ingest_frame":
                     b64_img = data.get("image")
-                    if b64_img and callable(self.on_ingest_frame):
-                        try:
-                            raw_bytes = base64.b64decode(b64_img)
-                            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-                            decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                            if decoded is not None:
-                                self.on_ingest_frame(decoded)
-                        except Exception:
-                            pass
+                    if b64_img:
+                        # Auto-switch pipeline to web_stream if it was started without --web-input
+                        if not callable(self.on_ingest_frame) and callable(self.on_switch_source):
+                            try:
+                                print("🔄 [AI Ingestion] Web frame detected — switching AI reader to web_stream...")
+                                self.on_switch_source({
+                                    "sourceType": "web_stream",
+                                    "sourceValue": data.get("sourceType", "web_stream"),
+                                })
+                                self.ingest_mode = "ws"
+                            except Exception as e:
+                                print(f"[WebSocketSink] Auto-switch to web_stream failed: {e}")
+
+                        if callable(self.on_ingest_frame):
+                            try:
+                                raw_bytes = base64.b64decode(b64_img)
+                                arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+                                decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                                if decoded is not None:
+                                    self._ingested_frames += 1
+                                    if self._ingested_frames == 1 or self._ingested_frames % 30 == 0:
+                                        print(
+                                            f"📥 [AI Ingestion] Frame #{self._ingested_frames} received from Web UI "
+                                            f"({decoded.shape[1]}x{decoded.shape[0]})"
+                                        )
+                                    self.on_ingest_frame(decoded)
+                            except Exception as e:
+                                print(f"[WebSocketSink] Error decoding ingest_frame: {e}")
                 elif msg_type == "switch_source":
+                    print(
+                        f"🎬 [AI Source] Switching input source -> "
+                        f"type='{data.get('sourceType')}', value='{data.get('sourceValue')}'"
+                    )
                     if callable(self.on_switch_source):
                         try:
                             self.on_switch_source(data)
@@ -277,7 +306,11 @@ class WebSocketSink(BaseSink):
         while not self._stopped:
             try:
                 with ws_sync.connect(self.ws_url) as ws:
-                    print(f"[WebSocketSink] Connected to {self.ws_url}")
+                    print(f"🔌 [WebSocketSink] Connected to {self.ws_url}")
+
+                    # Always send camera_init immediately upon connecting or reconnecting
+                    # so api.VDAT registers this AI Engine and pushes latest zone configs.
+                    ws.send(json.dumps(self._build_camera_init_packet()))
 
                     # Start dedicated reader thread to listen for server commands
                     reader_thread = threading.Thread(
@@ -291,11 +324,21 @@ class WebSocketSink(BaseSink):
                         try:
                             msg = self._queue.get(timeout=0.5)
                             ws.send(json.dumps(msg))
+                            if msg.get("type") == "frame":
+                                self._sent_frames += 1
+                                if self._sent_frames == 1 or self._sent_frames % 60 == 0:
+                                    tel = msg.get("telemetry") or {}
+                                    print(
+                                        f"📤 [AI Output] Annotated frame #{self._sent_frames} sent to Web UI "
+                                        f"(vehicles={tel.get('vehicle_count', 0)}, "
+                                        f"light={tel.get('light_state', 'unknown')}, "
+                                        f"fps={tel.get('fps', 0)})"
+                                    )
                         except Empty:
                             continue
             except Exception as e:
                 if not self._stopped:
-                    # Connection failed or disconnected; wait and retry
+                    print(f"⚠️ [WebSocketSink] Connection lost ({e}). Reconnecting in {self.reconnect_interval}s...")
                     time.sleep(self.reconnect_interval)
 
     def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:
