@@ -49,11 +49,12 @@ class TrafficPipeline:
             new_light_detector = TrafficLightDetector.from_file(zones_file)
             self.zone_checker = new_zone_checker
             self.light_detector = new_light_detector
+            light_count = len(new_light_detector.traffic_lights) if new_light_detector else 0
             print(
                 f"🔄 [AI Zones] Applied live zone update from {zones_file}: "
                 f"{len(new_zone_checker.lanes)} lane(s), "
                 f"{len(new_zone_checker.intersection)} intersection pts, "
-                f"{len(new_light_detector.traffic_lights)} traffic light point(s)"
+                f"{light_count} traffic light point(s)"
             )
         except Exception as e:
             print(f"[Pipeline] Error reloading zones from {zones_file}: {e}")
