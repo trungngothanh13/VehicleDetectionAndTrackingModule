@@ -22,7 +22,7 @@ def normalize_tracker_type(tracker_type: str) -> str:
     return normalized
 
 
-def create_tracker(config: Any) -> BaseTracker:
+def create_tracker(config: Any, shared_model: Any = None, model_lock: Any = None) -> BaseTracker:
     """
     Factory function to instantiate a tracker based on configuration.
     
@@ -50,6 +50,8 @@ def create_tracker(config: Any) -> BaseTracker:
             confidence_threshold=confidence_threshold,
             imgsz=imgsz,
             tracker_yaml=tracker_yaml,
+            shared_model=shared_model,
+            model_lock=model_lock,
         )
 
     elif tracker_type in ('bytetrack', 'bytetrack.yaml'):
@@ -61,6 +63,8 @@ def create_tracker(config: Any) -> BaseTracker:
             confidence_threshold=confidence_threshold,
             imgsz=imgsz,
             tracker_yaml=tracker_yaml,
+            shared_model=shared_model,
+            model_lock=model_lock,
         )
 
     elif tracker_type == 'deepsort':
@@ -73,6 +77,8 @@ def create_tracker(config: Any) -> BaseTracker:
             imgsz=imgsz,
             tracker_yaml=deepsort_cfg.get('tracker_yaml', None),
             embedder_gpu=(tracker_device == 'cuda'),
+            shared_model=shared_model,
+            model_lock=model_lock,
             **{k: v for k, v in deepsort_cfg.items() if k != 'tracker_yaml'},
         )
 

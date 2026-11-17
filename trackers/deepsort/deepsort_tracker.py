@@ -21,6 +21,8 @@ class DeepSortTracker(BaseTracker):
         confidence_threshold: float = 0.30,
         imgsz: int = 1280,
         tracker_yaml: str = None,
+        shared_model=None,
+        model_lock=None,
         **kwargs,
     ):
         super().__init__(
@@ -28,6 +30,8 @@ class DeepSortTracker(BaseTracker):
             target_classes=target_classes,
             confidence_threshold=confidence_threshold,
             imgsz=imgsz,
+            shared_model=shared_model,
+            model_lock=model_lock,
             **kwargs,
         )
         # Load configuration from YAML file
@@ -57,7 +61,7 @@ class DeepSortTracker(BaseTracker):
         half = kwargs.get('half', yaml_config.get('half', True))
         embedder_gpu = kwargs.get('embedder_gpu', yaml_config.get('embedder_gpu', True))
 
-        self.model = YOLO(self.model_name)
+        self.model = shared_model if shared_model is not None else YOLO(self.model_name)
         self.use_reid = use_reid
         self.half = half
 
@@ -102,12 +106,7 @@ class DeepSortTracker(BaseTracker):
         Run YOLO detection, associate tracks via DeepSORT (IoU or ReID),
         and update Kalman filter state.
         """
-        results = self.model(
-            frame,
-            conf=self.confidence_threshold,
-            imgsz=self.imgsz,
-            verbose=False,
-        )
+        results = self._run_model_predict(frame)
         result = results[0]
 
         raw_detections = []

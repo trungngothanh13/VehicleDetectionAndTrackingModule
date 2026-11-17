@@ -1,13 +1,10 @@
 import os
-import numpy as np
-import supervision as sv
-from ultralytics import YOLO
-from trackers.base_tracker import BaseTracker
+from trackers.base_tracker import UltralyticsMotTracker
 
 
-class ByteTrackTracker(BaseTracker):
+class ByteTrackTracker(UltralyticsMotTracker):
     """
-    Vehicle Detection and Tracking using Ultralytics YOLO with built-in ByteTrack.
+    Vehicle Detection and Tracking using YOLO + isolated Ultralytics ByteTrack state.
     Reads tracker parameters from `bytetrack.yaml`.
     """
 
@@ -18,60 +15,21 @@ class ByteTrackTracker(BaseTracker):
         confidence_threshold: float = 0.30,
         imgsz: int = 1280,
         tracker_yaml: str = None,
+        shared_model=None,
+        model_lock=None,
         **kwargs,
     ):
+        local_yaml = os.path.join(os.path.dirname(__file__), 'bytetrack.yaml')
+        default_yaml = local_yaml if os.path.exists(local_yaml) else 'bytetrack.yaml'
         super().__init__(
+            tracker_type='bytetrack',
+            default_yaml_path=default_yaml,
             model_name=model_name,
             target_classes=target_classes,
             confidence_threshold=confidence_threshold,
             imgsz=imgsz,
+            tracker_yaml=tracker_yaml,
+            shared_model=shared_model,
+            model_lock=model_lock,
             **kwargs,
         )
-        if tracker_yaml is None:
-            local_yaml = os.path.join(os.path.dirname(__file__), 'bytetrack.yaml')
-            tracker_yaml = local_yaml if os.path.exists(local_yaml) else 'bytetrack.yaml'
-        self.tracker_yaml = tracker_yaml
-        self.model = YOLO(self.model_name)
-
-    def track(self, frame: np.ndarray) -> sv.Detections:
-        """
-        Detect + track in one pass using Ultralytics ByteTrack tracker.
-        persist=True maintains tracker state between frames.
-        """
-        results = self.model.track(
-            frame,
-            conf=self.confidence_threshold,
-            imgsz=self.imgsz,
-            persist=True,
-            tracker=self.tracker_yaml,
-            verbose=False,
-        )
-        result = results[0]
-
-        if result.boxes is None or result.boxes.id is None:
-            return sv.Detections.empty()
-
-        boxes = result.boxes
-        cls_np = boxes.cls.cpu().numpy().astype(int)
-
-        # Filter to configured vehicle classes only
-        mask = np.isin(cls_np, list(self.target_classes.keys()))
-        if not mask.any():
-            return sv.Detections.empty()
-
-        xyxy = boxes.xyxy.cpu().numpy()[mask].astype(np.float32)
-        confidences = boxes.conf.cpu().numpy()[mask].astype(np.float32)
-        class_ids = cls_np[mask]
-        tracker_ids = boxes.id.cpu().numpy()[mask].astype(int)
-
-        sv_detections = sv.Detections(
-            xyxy=xyxy,
-            confidence=confidences,
-            class_id=class_ids,
-            tracker_id=tracker_ids,
-        )
-
-        for tid in tracker_ids:
-            self._seen_ids.add(tid)
-
-        return sv_detections

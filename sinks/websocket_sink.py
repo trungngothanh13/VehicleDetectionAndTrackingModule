@@ -217,15 +217,15 @@ class WebSocketSink(BaseSink):
                                     self._ingested_frames += 1
                                     if self._ingested_frames == 1 or self._ingested_frames % 30 == 0:
                                         print(
-                                            f"📥 [AI Ingestion] Frame #{self._ingested_frames} received from Web UI "
+                                            f"📥 [{self.camera_id}] AI Ingestion frame #{self._ingested_frames} received "
                                             f"({decoded.shape[1]}x{decoded.shape[0]})"
                                         )
                                     self.on_ingest_frame(decoded)
                             except Exception as e:
-                                print(f"[WebSocketSink] Error decoding ingest_frame: {e}")
+                                print(f"[{self.camera_id}] Error decoding ingest_frame: {e}")
                 elif msg_type == "switch_source":
                     print(
-                        f"🎬 [AI Source] Switching input source -> "
+                        f"🎬 [{self.camera_id}] Switching input source -> "
                         f"type='{data.get('sourceType')}', value='{data.get('sourceValue')}'"
                     )
                     if callable(self.on_switch_source):
@@ -250,10 +250,11 @@ class WebSocketSink(BaseSink):
                 "intersection": intersection,
                 "traffic_lights": light_box if isinstance(light_box, list) else [],
             }
+            os.makedirs(os.path.dirname(self.zones_file) or ".", exist_ok=True)
             with open(self.zones_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
             print(
-                f"[WebSocketSink] Synced zones from {source}: "
+                f"[{self.camera_id}] Synced zones from {source}: "
                 f"{len(lanes)} lane(s), {len(intersection)} intersection pts, "
                 f"{len(payload['traffic_lights'])} light point(s)"
             )
@@ -329,7 +330,7 @@ class WebSocketSink(BaseSink):
                                 if self._sent_frames == 1 or self._sent_frames % 60 == 0:
                                     tel = msg.get("telemetry") or {}
                                     print(
-                                        f"📤 [AI Output] Annotated frame #{self._sent_frames} sent to Web UI "
+                                        f"📤 [{self.camera_id}] AI Output frame #{self._sent_frames} sent to Web UI "
                                         f"(vehicles={tel.get('vehicle_count', 0)}, "
                                         f"light={tel.get('light_state', 'unknown')}, "
                                         f"fps={tel.get('fps', 0)})"
@@ -338,7 +339,7 @@ class WebSocketSink(BaseSink):
                             continue
             except Exception as e:
                 if not self._stopped:
-                    print(f"⚠️ [WebSocketSink] Connection lost ({e}). Reconnecting in {self.reconnect_interval}s...")
+                    print(f"⚠️ [{self.camera_id}] WebSocket connection lost ({e}). Reconnecting in {self.reconnect_interval}s...")
                     time.sleep(self.reconnect_interval)
 
     def on_evidence_clip(self, event: ViolationEvent, clip_path: str) -> None:

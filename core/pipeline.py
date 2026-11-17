@@ -27,6 +27,7 @@ class TrafficPipeline:
         light_detector: Optional[TrafficLightDetector] = None,
         zone_checker: Optional[ZoneChecker] = None,
         max_frames: Optional[int] = None,
+        camera_id: Optional[str] = None,
     ):
         self.reader = reader
         self.tracker = tracker
@@ -36,11 +37,21 @@ class TrafficPipeline:
         self.light_detector = light_detector
         self.zone_checker = zone_checker
         self.max_frames = max_frames or getattr(config, 'MAX_FRAMES', None)
+        self.camera_id = camera_id or getattr(config, 'CAMERA_ID', 'cam-01')
 
         self.violations: Set[int] = set()
         self.violation_events: List[ViolationEvent] = []
         self._evidence_recorder: Optional[EvidenceRecorder] = None
         self._pending_reader: Optional[BaseFrameReader] = None
+        self._stopped = False
+
+    def stop(self) -> None:
+        """Signals this pipeline session to exit gracefully."""
+        self._stopped = True
+        try:
+            self.reader.release()
+        except Exception:
+            pass
 
     def reload_zones(self, zones_file: str) -> None:
         """Dynamically reloads ZoneChecker and TrafficLightDetector when zones are updated remotely."""
@@ -82,15 +93,15 @@ class TrafficPipeline:
             'width': width,
             'height': height,
             'total_frames': self.reader.total_frames,
-            'camera_id': getattr(self.config, 'CAMERA_ID', 'cam-01'),
+            'camera_id': self.camera_id,
         }
 
         print("=" * 60)
-        print(f"Pipeline Starting: {pipeline_info['input_source']}")
-        print(f"Resolution:       {width}x{height} @ {fps} FPS")
-        print(f"Active Tracker:   {pipeline_info['tracker_type'].upper()} (Model: {pipeline_info['model_name']})")
-        print(f"Max Frames:       {self.max_frames if self.max_frames else 'Full stream'}")
-        print(f"Active Sinks:     {[s.__class__.__name__ for s in self.sinks]}")
+        print(f"[{self.camera_id}] Pipeline Starting: {pipeline_info['input_source']}")
+        print(f"[{self.camera_id}] Resolution:       {width}x{height} @ {fps} FPS")
+        print(f"[{self.camera_id}] Active Tracker:   {pipeline_info['tracker_type'].upper()} (Model: {pipeline_info['model_name']})")
+        print(f"[{self.camera_id}] Max Frames:       {self.max_frames if self.max_frames else 'Full stream'}")
+        print(f"[{self.camera_id}] Active Sinks:     {[s.__class__.__name__ for s in self.sinks]}")
         print("=" * 60 + "\n")
 
         # Initialize the evidence video clip recorder
@@ -127,7 +138,7 @@ class TrafficPipeline:
         start_time = time.time()
 
         try:
-            while True:
+            while not self._stopped:
                 if self._pending_reader is not None:
                     old_reader = self.reader
                     self.reader = self._pending_reader
@@ -258,7 +269,7 @@ class TrafficPipeline:
                 if frame_count % 30 == 0:
                     elapsed = time.time() - start_time
                     current_fps = frame_count / elapsed if elapsed > 0 else 0
-                    print(f"Frame {frame_count}: Vehicles={current_count}, Tracked={total_tracked}, Violations={len(self.violations)}, Light={light_state} ({current_fps:.1f} FPS)")
+                    print(f"[{self.camera_id}] Frame {frame_count}: Vehicles={current_count}, Tracked={total_tracked}, Violations={len(self.violations)}, Light={light_state} ({current_fps:.1f} FPS)")
 
         finally:
             # Flush any in-progress evidence clips before shutting down
