@@ -1,4 +1,5 @@
 import time
+from collections import deque
 from typing import List, Optional, Set
 import numpy as np
 
@@ -150,6 +151,7 @@ class TrafficPipeline:
 
         frame_count = 0
         start_time = time.time()
+        fps_window: deque = deque(maxlen=30)
 
         try:
             while not self._stopped:
@@ -168,6 +170,7 @@ class TrafficPipeline:
                     fps = self.reader.fps or 30
                     frame_count = 0
                     start_time = time.time()
+                    fps_window.clear()
                     print(f"[Pipeline] Switched active camera source ({self.reader.width}x{self.reader.height} @ {fps} FPS)")
 
                 if self.max_frames and frame_count >= self.max_frames:
@@ -180,10 +183,16 @@ class TrafficPipeline:
                         continue
                     break
 
-                # Preserve clean, unannotated raw frame for evidence archive
-                raw_frame = frame.copy()
+                # Preserve clean, unannotated raw frame only when EvidenceRecorder isn't already hooked to reader
+                raw_frame = None if self._raw_consumer_registered else frame.copy()
 
                 frame_count += 1
+                now_mono = time.monotonic()
+                fps_window.append(now_mono)
+                if len(fps_window) >= 2 and (fps_window[-1] - fps_window[0]) > 0.05:
+                    live_fps = round((len(fps_window) - 1) / (fps_window[-1] - fps_window[0]), 1)
+                else:
+                    live_fps = float(fps)
                 timestamp_sec = frame_count / fps
                 timestamp_str = f"{timestamp_sec:.2f}s"
 
@@ -238,25 +247,29 @@ class TrafficPipeline:
                                 self.violation_events.append(event)
                                 print(f"🚨 [{self.camera_id}] [VIOLATION] Vehicle #{tracker_id} ({class_name}) at Frame {frame_count} ({timestamp_str})")
 
-                # 4. Drawing & HUD Visualization
-                if self.zone_checker:
-                    lights = self.light_detector.traffic_lights if self.light_detector else None
-                    frame = self.visualizer.draw_zones(
-                        frame,
-                        self.zone_checker.lanes,
-                        self.zone_checker.intersection,
-                        lights,
-                        exit_zones=self.zone_checker.exit_zones,
-                    )
+                # 4. Drawing & HUD Visualization (skip expensive OpenCV overlays for unfocused background cameras unless a violation occurs)
+                should_annotate = bool(new_violations) or any(
+                    getattr(s, 'needs_annotated_frame', True) for s in self.sinks
+                )
+                if should_annotate:
+                    if self.zone_checker:
+                        lights = self.light_detector.traffic_lights if self.light_detector else None
+                        frame = self.visualizer.draw_zones(
+                            frame,
+                            self.zone_checker.lanes,
+                            self.zone_checker.intersection,
+                            lights,
+                            exit_zones=self.zone_checker.exit_zones,
+                        )
 
-                frame = self.visualizer.draw_detections(frame, tracked, self.tracker, violation_ids=self.violations)
+                    frame = self.visualizer.draw_detections(frame, tracked, self.tracker, violation_ids=self.violations)
 
                 current_count = len(tracked) if tracked.tracker_id is not None else 0
                 total_tracked = self.tracker.get_total_tracked()
 
                 # 5. Buffer frame for evidence (if not already hooked into reader)
                 if not self._raw_consumer_registered:
-                    frame_to_buffer = raw_frame if evidence_mode == 'raw' else frame
+                    frame_to_buffer = raw_frame if (evidence_mode == 'raw' and raw_frame is not None) else frame
                     self._evidence_recorder.buffer_frame(frame_to_buffer, frame_count)
 
                 # 6. Trigger evidence clip recording for new violations
@@ -270,7 +283,7 @@ class TrafficPipeline:
                 telemetry = FrameTelemetry(
                     frame_number=frame_count,
                     timestamp=timestamp_sec,
-                    fps=fps,
+                    fps=live_fps,
                     vehicle_count=current_count,
                     total_tracked=total_tracked,
                     light_state=light_state,

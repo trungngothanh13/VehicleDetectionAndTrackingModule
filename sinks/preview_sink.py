@@ -14,6 +14,10 @@ class PreviewSink(BaseSink):
         self.window_name = window_name
         self.should_stop = False
 
+    @property
+    def needs_annotated_frame(self) -> bool:
+        return True
+
     def on_frame(self, frame: np.ndarray, telemetry: FrameTelemetry) -> None:
         cv2.imshow(self.window_name, frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):

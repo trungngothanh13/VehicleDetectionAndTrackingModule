@@ -376,9 +376,14 @@ def main():
     if len(camera_ids) > 1:
         config.ENABLE_WEBSOCKET_STREAM = True
 
-    print(f"🧠 [AI Core] Loading shared YOLO model '{config.MODEL_NAME}' with Micro-Batcher for cameras: {camera_ids}")
+    print(f"🧠 [AI Core] Loading shared YOLO model '{config.MODEL_NAME}' (imgsz={config.IMGSZ}) with Micro-Batcher for cameras: {camera_ids}")
     raw_model = YOLO(config.MODEL_NAME)
-    batch_runner = BatchModelRunner(raw_model, max_batch_size=max(8, len(camera_ids)), max_wait_sec=0.004)
+    batch_runner = BatchModelRunner(
+        raw_model,
+        max_batch_size=max(8, len(camera_ids)),
+        max_wait_sec=0.008,
+        warmup_imgsz=config.IMGSZ,
+    )
     model_lock = threading.Lock()
 
     if len(camera_ids) == 1:

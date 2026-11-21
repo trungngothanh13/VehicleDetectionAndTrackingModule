@@ -20,7 +20,8 @@ class BatchModelRunner:
         self,
         model,
         max_batch_size: int = 8,
-        max_wait_sec: float = 0.004,
+        max_wait_sec: float = 0.008,
+        warmup_imgsz: int = 864,
     ):
         self.model = model
         self.max_batch_size = max_batch_size
@@ -49,7 +50,7 @@ class BatchModelRunner:
             self.model.predict(
                 [dummy_frame],
                 conf=0.3,
-                imgsz=1280,
+                imgsz=warmup_imgsz,
                 verbose=False,
                 **self._predict_precision_kwargs,
             )

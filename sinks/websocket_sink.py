@@ -2,10 +2,11 @@ import cv2
 import os
 import json
 import base64
+import struct
 import time
 import threading
 from queue import Queue, Empty
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import numpy as np
 import requests
 
@@ -19,28 +20,49 @@ from sinks.base_sink import BaseSink
 from core.events import FrameTelemetry, ViolationEvent
 
 
+def _pack_binary_frame(header: Dict[str, Any], payload: bytes) -> bytes:
+    """Packs [4-byte uint32 BE headerLen][UTF-8 JSON header][raw JPEG bytes]."""
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    return struct.pack(">I", len(header_bytes)) + header_bytes + payload
+
+
+def _unpack_binary_frame(raw: bytes) -> Optional[Tuple[Dict[str, Any], bytes]]:
+    """Unpacks [4-byte uint32 BE headerLen][UTF-8 JSON header][raw JPEG bytes]."""
+    if len(raw) < 4:
+        return None
+    header_len = struct.unpack(">I", raw[:4])[0]
+    if header_len <= 0 or 4 + header_len > len(raw):
+        return None
+    try:
+        header = json.loads(raw[4:4 + header_len].decode("utf-8"))
+        return header, raw[4 + header_len:]
+    except Exception:
+        return None
+
+
 class WebSocketSink(BaseSink):
     """
-    Asynchronously streams processed video frames (JPEG) and violation alerts
-    over a persistent WebSocket connection to api.VDAT.
-    Uses a background worker thread with a bounded queue to prevent network latency
-    from blocking GPU inference.
+    Asynchronously streams processed video frames (binary JPEG when focused,
+    lightweight JSON telemetry when unfocused) and violation alerts over a
+    persistent WebSocket connection to api.VDAT.
+    Moves JPEG encoding completely off the inference thread onto the background
+    sender thread so GPU inference never blocks on encoding or network I/O.
     """
 
     def __init__(
         self,
         ws_url: str = "ws://localhost:5000/ws/inference",
         camera_id: str = "cam-01",
-        jpeg_quality: int = 65,
+        jpeg_quality: int = 60,
         target_fps: float = 15.0,
-        max_width: int = 960,
+        max_width: int = 854,
         queue_size: int = 2,
         reconnect_interval: int = 5,
         evidence_dir: str = "output/evidence",
         zones_file: str = "zones.json",
-        on_zone_update: Optional[ Any ] = None,
-        on_ingest_frame: Optional[ Any ] = None,
-        on_switch_source: Optional[ Any ] = None,
+        on_zone_update: Optional[Any] = None,
+        on_ingest_frame: Optional[Any] = None,
+        on_switch_source: Optional[Any] = None,
         ingest_mode: str = "local",
     ):
         self.ws_url = ws_url
@@ -57,7 +79,17 @@ class WebSocketSink(BaseSink):
         self.ingest_mode = ingest_mode
         self._pipeline_info: Dict[str, Any] = {}
 
-        self._queue: Queue = Queue(maxsize=queue_size)
+        # Only encode & upload JPEG images back over SSH when a web client focuses on this camera
+        self._send_image: bool = (self.camera_id == "cam-01")
+
+        # Separate lossless queue for violations, clip alerts, and credit ACKs
+        self._priority_queue: Queue = Queue()
+        # Single-slot latest-frame handoff (encoded on background worker thread, not inference thread)
+        self._frame_lock = threading.Lock()
+        self._latest_frame: Optional[Tuple[Optional[np.ndarray], Dict[str, Any]]] = None
+        self._pending_acked_frames = 0
+        self._wake_event = threading.Event()
+
         self._stopped = False
         self._thread: Optional[threading.Thread] = None
         self._encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
@@ -73,6 +105,10 @@ class WebSocketSink(BaseSink):
 
         if not WEBSOCKETS_AVAILABLE:
             print("[WebSocketSink] Warning: 'websockets' package not available. WebSocket stream disabled.")
+
+    @property
+    def needs_annotated_frame(self) -> bool:
+        return self._send_image
 
     def _build_camera_init_packet(self) -> Dict[str, Any]:
         pipeline_info = self._pipeline_info or {}
@@ -103,33 +139,19 @@ class WebSocketSink(BaseSink):
         if not WEBSOCKETS_AVAILABLE or self._stopped:
             return
 
-        now = time.time()
-        # Throttle stream FPS to target_fps to prevent network congestion
-        if self._min_frame_interval > 0 and (now - self._last_frame_time) < self._min_frame_interval:
-            return
-        self._last_frame_time = now
+        # In local/file/RTSP mode, cap output FPS; in WS ingest mode, pace 1:1 with incoming credit flow
+        if self.ingest_mode != "ws":
+            now = time.time()
+            if self._min_frame_interval > 0 and (now - self._last_frame_time) < self._min_frame_interval:
+                return
+            self._last_frame_time = now
 
-        # Downscale frame for lightweight live web preview
-        h, w = frame.shape[:2]
-        if self.max_width and w > self.max_width:
-            new_h = int(h * (self.max_width / w))
-            preview_frame = cv2.resize(frame, (self.max_width, new_h), interpolation=cv2.INTER_AREA)
-        else:
-            preview_frame = frame
-
-        # Encode frame to JPEG
-        ret, buffer = cv2.imencode('.jpg', preview_frame, self._encode_params)
-        if not ret:
-            return
-
-        b64_image = base64.b64encode(buffer).decode('utf-8')
-        message = {
-            "type": "frame",
-            "cameraId": self.camera_id,
-            "telemetry": telemetry.to_dict(),
-            "image": b64_image,
-        }
-        self._enqueue(message)
+        frame_ref = frame if self._send_image else None
+        tel_dict = telemetry.to_dict()
+        with self._frame_lock:
+            self._latest_frame = (frame_ref, tel_dict)
+            self._pending_acked_frames += 1
+        self._wake_event.set()
 
     def on_violation(self, event: ViolationEvent, snapshot: np.ndarray) -> None:
         if not WEBSOCKETS_AVAILABLE or self._stopped:
@@ -144,29 +166,38 @@ class WebSocketSink(BaseSink):
             "event": event.to_dict(),
             "evidenceImage": b64_snapshot,
         }
-        self._enqueue(message)
+        self._enqueue_priority(message)
 
-    def _enqueue(self, message: Dict[str, Any]) -> None:
+    def _enqueue_priority(self, message: Dict[str, Any]) -> None:
         try:
-            # If queue is full, discard oldest frame so only the freshest frame is sent
-            while self._queue.full():
-                try:
-                    dropped = self._queue.get_nowait()
-                    # Always preserve violations & clip ready notifications
-                    if dropped.get('type') in ('violation', 'evidence_clip_ready'):
-                        self._queue.put_nowait(dropped)
-                        break
-                except Empty:
-                    break
-            self._queue.put_nowait(message)
+            self._priority_queue.put_nowait(message)
+            self._wake_event.set()
         except Exception:
             pass
+
+    def _parse_inbound(self, raw_msg: Any) -> Optional[Tuple[Dict[str, Any], Optional[bytes]]]:
+        if isinstance(raw_msg, (bytes, bytearray, memoryview)):
+            return _unpack_binary_frame(bytes(raw_msg))
+        if isinstance(raw_msg, str) and raw_msg:
+            try:
+                return json.loads(raw_msg), None
+            except Exception:
+                return None
+        return None
 
     def _handle_control_message(self, data: Dict[str, Any]) -> None:
         """Handles non-frame WebSocket messages from api.VDAT."""
         msg_type = data.get("type")
 
-        if msg_type == "request_clip_upload":
+        if msg_type == "set_stream_focus":
+            send_img = bool(data.get("sendImage", False))
+            if self._send_image != send_img:
+                self._send_image = send_img
+                print(
+                    f"👁️ [{self.camera_id}] Stream image focus -> "
+                    f"{'ON (binary JPEG)' if send_img else 'OFF (telemetry only)'}"
+                )
+        elif msg_type == "request_clip_upload":
             filename = data.get("filename")
             if filename:
                 t = threading.Thread(
@@ -202,12 +233,12 @@ class WebSocketSink(BaseSink):
                 except Exception as e:
                     print(f"[WebSocketSink] Error switching source: {e}")
 
-    def _process_ingest_frame(self, data: Dict[str, Any]) -> None:
-        """Decodes the latest ingested frame and pushes it into the camera reader."""
-        b64_img = data.get("image")
-        if not b64_img:
-            return
-
+    def _process_ingest_frame(
+        self,
+        data: Dict[str, Any],
+        jpeg_bytes: Optional[bytes] = None,
+    ) -> None:
+        """Decodes the latest ingested frame (binary JPEG or base64 JSON) and pushes it to the reader."""
         # Auto-switch pipeline to web_stream if it was started without --web-input
         if not callable(self.on_ingest_frame) and callable(self.on_switch_source):
             try:
@@ -220,21 +251,32 @@ class WebSocketSink(BaseSink):
             except Exception as e:
                 print(f"[WebSocketSink] Auto-switch to web_stream failed: {e}")
 
-        if callable(self.on_ingest_frame):
-            try:
+        if not callable(self.on_ingest_frame):
+            return
+
+        try:
+            if jpeg_bytes is not None:
+                if not jpeg_bytes:
+                    return
+                arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            else:
+                b64_img = data.get("image")
+                if not b64_img:
+                    return
                 raw_bytes = base64.b64decode(b64_img)
                 arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-                decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if decoded is not None:
-                    self._ingested_frames += 1
-                    if self._ingested_frames == 1 or self._ingested_frames % 30 == 0:
-                        print(
-                            f"📥 [{self.camera_id}] AI Ingestion frame #{self._ingested_frames} received "
-                            f"({decoded.shape[1]}x{decoded.shape[0]})"
-                        )
-                    self.on_ingest_frame(decoded)
-            except Exception as e:
-                print(f"[{self.camera_id}] Error decoding ingest_frame: {e}")
+
+            decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if decoded is not None:
+                self._ingested_frames += 1
+                if self._ingested_frames == 1 or self._ingested_frames % 60 == 0:
+                    print(
+                        f"📥 [{self.camera_id}] AI Ingestion frame #{self._ingested_frames} received "
+                        f"({decoded.shape[1]}x{decoded.shape[0]})"
+                    )
+                self.on_ingest_frame(decoded)
+        except Exception as e:
+            print(f"[{self.camera_id}] Error decoding ingest_frame: {e}")
 
     def _reader_loop(self, ws: Any) -> None:
         """Background thread listening for incoming server commands and draining stale ingest frames."""
@@ -243,15 +285,19 @@ class WebSocketSink(BaseSink):
                 raw_msg = ws.recv(timeout=1.0)
                 if not raw_msg:
                     continue
-                data = json.loads(raw_msg)
+                parsed = self._parse_inbound(raw_msg)
+                if parsed is None:
+                    continue
+                data, jpeg_bytes = parsed
                 msg_type = data.get("type")
 
-                if msg_type != "ingest_frame":
+                if msg_type not in ("ingest_frame", "source_frame"):
                     self._handle_control_message(data)
                     continue
 
-                # Drain immediately buffered messages so only the freshest ingest_frame is decoded
-                latest_ingest: Optional[Dict[str, Any]] = data
+                # Drain immediately buffered messages so only the freshest frame is decoded
+                latest_ingest: Optional[Tuple[Dict[str, Any], Optional[bytes]]] = (data, jpeg_bytes)
+                skipped_frames = 0
                 while not self._stopped:
                     try:
                         queued_raw = ws.recv(timeout=0)
@@ -259,17 +305,30 @@ class WebSocketSink(BaseSink):
                         break
                     if not queued_raw:
                         continue
-                    queued_data = json.loads(queued_raw)
+                    queued_parsed = self._parse_inbound(queued_raw)
+                    if queued_parsed is None:
+                        continue
+                    queued_data, queued_jpeg = queued_parsed
                     queued_type = queued_data.get("type")
-                    if queued_type == "ingest_frame":
-                        latest_ingest = queued_data
+                    if queued_type in ("ingest_frame", "source_frame"):
+                        if latest_ingest is not None:
+                            skipped_frames += 1
+                        latest_ingest = (queued_data, queued_jpeg)
                     else:
-                        if queued_type == "switch_source":
+                        if queued_type == "switch_source" and latest_ingest is not None:
+                            skipped_frames += 1
                             latest_ingest = None
                         self._handle_control_message(queued_data)
 
+                if skipped_frames > 0:
+                    self._enqueue_priority({
+                        "type": "frame_ack",
+                        "cameraId": self.camera_id,
+                        "count": skipped_frames,
+                    })
+
                 if latest_ingest is not None:
-                    self._process_ingest_frame(latest_ingest)
+                    self._process_ingest_frame(latest_ingest[0], latest_ingest[1])
             except TimeoutError:
                 continue
             except Exception:
@@ -366,6 +425,71 @@ class WebSocketSink(BaseSink):
         except Exception as e:
             print(f"[WebSocketSink] Error uploading evidence clip '{filename}': {e}")
 
+    def _send_latest_frame(
+        self,
+        ws: Any,
+        frame_obj: Optional[np.ndarray],
+        tel_dict: Dict[str, Any],
+        acked_frames: int,
+    ) -> None:
+        """Encodes JPEG on the sender thread ONLY when focused; otherwise sends compact JSON telemetry."""
+        if frame_obj is not None and self._send_image:
+            h, w = frame_obj.shape[:2]
+            if self.max_width and w > self.max_width:
+                new_h = int(h * (self.max_width / w))
+                preview = cv2.resize(frame_obj, (self.max_width, new_h), interpolation=cv2.INTER_AREA)
+            else:
+                preview = frame_obj
+
+            ret, buffer = cv2.imencode('.jpg', preview, self._encode_params)
+            if ret:
+                packet = _pack_binary_frame(
+                    {
+                        "type": "frame",
+                        "cameraId": self.camera_id,
+                        "telemetry": tel_dict,
+                        "ackedFrames": acked_frames,
+                    },
+                    buffer.tobytes(),
+                )
+                ws.send(packet)
+            else:
+                ws.send(
+                    json.dumps(
+                        {
+                            "type": "frame",
+                            "cameraId": self.camera_id,
+                            "telemetry": tel_dict,
+                            "image": None,
+                            "ackedFrames": acked_frames,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+        else:
+            ws.send(
+                json.dumps(
+                    {
+                        "type": "frame",
+                        "cameraId": self.camera_id,
+                        "telemetry": tel_dict,
+                        "image": None,
+                        "ackedFrames": acked_frames,
+                    },
+                    separators=(",", ":"),
+                )
+            )
+
+        self._sent_frames += 1
+        if self._sent_frames == 1 or self._sent_frames % 90 == 0:
+            print(
+                f"📤 [{self.camera_id}] AI Output #{self._sent_frames} "
+                f"({'binary JPEG' if (frame_obj is not None and self._send_image) else 'telemetry'}) "
+                f"(vehicles={tel_dict.get('vehicle_count', 0)}, "
+                f"light={tel_dict.get('light_state', 'unknown')}, "
+                f"fps={tel_dict.get('fps', 0)})"
+            )
+
     def _worker_loop(self) -> None:
         """Background worker thread that manages the WebSocket client connection."""
         while not self._stopped:
@@ -381,34 +505,40 @@ class WebSocketSink(BaseSink):
                 ) as ws:
                     print(f"🔌 [WebSocketSink] Connected to {self.ws_url}")
 
-                    # Always send camera_init immediately upon connecting or reconnecting
-                    # so api.VDAT registers this AI Engine and pushes latest zone configs.
+                    # Register camera and receive latest ZoneProfile & initial stream focus state
                     ws.send(json.dumps(self._build_camera_init_packet()))
 
-                    # Start dedicated reader thread to listen for server commands
                     reader_thread = threading.Thread(
                         target=self._reader_loop,
                         args=(ws,),
-                        daemon=True
+                        daemon=True,
                     )
                     reader_thread.start()
 
                     while not self._stopped:
-                        try:
-                            msg = self._queue.get(timeout=0.5)
-                            ws.send(json.dumps(msg))
-                            if msg.get("type") == "frame":
-                                self._sent_frames += 1
-                                if self._sent_frames == 1 or self._sent_frames % 60 == 0:
-                                    tel = msg.get("telemetry") or {}
-                                    print(
-                                        f"📤 [{self.camera_id}] AI Output frame #{self._sent_frames} sent to Web UI "
-                                        f"(vehicles={tel.get('vehicle_count', 0)}, "
-                                        f"light={tel.get('light_state', 'unknown')}, "
-                                        f"fps={tel.get('fps', 0)})"
-                                    )
-                        except Empty:
-                            continue
+                        self._wake_event.wait(timeout=0.5)
+                        self._wake_event.clear()
+
+                        # 1. Flush priority messages (violations, evidence clips, frame_ack)
+                        while not self._stopped:
+                            try:
+                                prio_msg = self._priority_queue.get_nowait()
+                                ws.send(json.dumps(prio_msg, separators=(",", ":")))
+                            except Empty:
+                                break
+
+                        # 2. Send latest frame/telemetry slot if updated
+                        frame_slot = None
+                        acked_frames = 0
+                        with self._frame_lock:
+                            if self._latest_frame is not None:
+                                frame_slot = self._latest_frame
+                                acked_frames = max(1, self._pending_acked_frames)
+                                self._latest_frame = None
+                                self._pending_acked_frames = 0
+
+                        if frame_slot is not None:
+                            self._send_latest_frame(ws, frame_slot[0], frame_slot[1], acked_frames)
             except Exception as e:
                 if not self._stopped:
                     print(f"⚠️ [{self.camera_id}] WebSocket connection lost ({e}). Reconnecting in {self.reconnect_interval}s...")
@@ -427,11 +557,10 @@ class WebSocketSink(BaseSink):
             "filename": filename,
             "clipPath": clip_path,
         }
-        self._enqueue(message)
+        self._enqueue_priority(message)
 
     def on_complete(self) -> None:
         self._stopped = True
+        self._wake_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
-
-

@@ -18,7 +18,7 @@ class Config:
     # =========================================================================
     MODEL_NAME = os.getenv('MODEL_NAME', 'yolo26l.pt')
     CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.30'))
-    IMGSZ = int(os.getenv('IMGSZ', '1280'))
+    IMGSZ = int(os.getenv('IMGSZ', '864'))
 
     # COCO classes to detect and track
     # 1: bicycle, 2: car, 3: motorcycle, 5: bus, 7: truck
@@ -75,6 +75,6 @@ class Config:
     # =========================================================================
     ENABLE_WEBSOCKET_STREAM = os.getenv('ENABLE_WEBSOCKET_STREAM', 'True').lower() in ('true', '1', 't')
     API_WS_URL = os.getenv('API_WS_URL', 'ws://localhost:5000/ws/inference')
-    JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', '65'))
+    JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', '60'))
     STREAM_TARGET_FPS = float(os.getenv('STREAM_TARGET_FPS', '15.0'))
-    STREAM_MAX_WIDTH = int(os.getenv('STREAM_MAX_WIDTH', '960'))
+    STREAM_MAX_WIDTH = int(os.getenv('STREAM_MAX_WIDTH', '854'))

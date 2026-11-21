@@ -51,6 +51,10 @@ class FileSink(BaseSink):
         if self.save_evidence and self.evidence_dir:
             os.makedirs(self.evidence_dir, exist_ok=True)
 
+    @property
+    def needs_annotated_frame(self) -> bool:
+        return self._writer is not None
+
     def on_frame(self, frame: np.ndarray, telemetry: FrameTelemetry) -> None:
         self._last_telemetry = telemetry
         if self._writer is not None:
