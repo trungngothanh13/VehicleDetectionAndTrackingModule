@@ -39,7 +39,7 @@ class Config:
     # =========================================================================
     # VIDEO & I/O SETTINGS
     # =========================================================================
-    INPUT_VIDEO = os.getenv('INPUT_VIDEO', 'test_1.mp4')
+    INPUT_VIDEO = os.getenv('INPUT_VIDEO', 'ws')
     MAX_FRAMES = int(os.getenv('MAX_FRAMES', '0')) or None  # None = full video
     SIMULATE_CAMERA = os.getenv('SIMULATE_CAMERA', 'False').lower() in ('true', '1', 't')
     LOOP_VIDEO = os.getenv('LOOP_VIDEO', 'False').lower() in ('true', '1', 't')
@@ -52,8 +52,8 @@ class Config:
     EVIDENCE_DIR = os.path.join(OUTPUT_DIR, 'evidence')
 
     # Output saving flags
-    SAVE_OUTPUT_VIDEO = os.getenv('SAVE_OUTPUT_VIDEO', 'True').lower() in ('true', '1', 't')
-    SAVE_VIOLATION_LOG = os.getenv('SAVE_VIOLATION_LOG', 'True').lower() in ('true', '1', 't')
+    SAVE_OUTPUT_VIDEO = os.getenv('SAVE_OUTPUT_VIDEO', 'False').lower() in ('true', '1', 't')
+    SAVE_VIOLATION_LOG = os.getenv('SAVE_VIOLATION_LOG', 'False').lower() in ('true', '1', 't')
     SAVE_EVIDENCE_SNAPSHOTS = True
 
     # Evidence video clip settings
@@ -73,7 +73,7 @@ class Config:
     # =========================================================================
     # WEBSOCKET STREAMING SETTINGS (api.VDAT Integration)
     # =========================================================================
-    ENABLE_WEBSOCKET_STREAM = os.getenv('ENABLE_WEBSOCKET_STREAM', 'False').lower() in ('true', '1', 't')
+    ENABLE_WEBSOCKET_STREAM = os.getenv('ENABLE_WEBSOCKET_STREAM', 'True').lower() in ('true', '1', 't')
     API_WS_URL = os.getenv('API_WS_URL', 'ws://localhost:5000/ws/inference')
     JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', '65'))
     STREAM_TARGET_FPS = float(os.getenv('STREAM_TARGET_FPS', '15.0'))

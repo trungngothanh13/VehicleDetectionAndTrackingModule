@@ -181,6 +181,10 @@ class WebSocketSink(BaseSink):
                             daemon=True
                         )
                         t.start()
+                elif msg_type == "delete_evidence_clip":
+                    filename = data.get("filename")
+                    if filename:
+                        self._delete_local_clip(filename)
                 elif msg_type == "camera_ack":
                     print(
                         f"✅ [AI Engine] Registered with api.VDAT for camera '{self.camera_id}' "
@@ -239,29 +243,56 @@ class WebSocketSink(BaseSink):
                 # Connection dropped or closed; exit reader thread
                 break
 
+    def _delete_local_clip(self, filename: str) -> None:
+        """Deletes local MP4 evidence file when a violation is dismissed by an officer."""
+        safe_name = os.path.basename(filename)
+        candidates = [
+            os.path.join(self.evidence_dir, safe_name),
+            os.path.join("output", "evidence", safe_name),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output", "evidence", safe_name)),
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                try:
+                    os.remove(c)
+                    print(f"[{self.camera_id}] Deleted dismissed local clip: {safe_name}")
+                except OSError:
+                    pass
+
     def _apply_remote_zones(self, zones_cfg: Dict[str, Any], source: str = "remote") -> None:
-        """Persists updated zones from api.VDAT to disk and triggers live reload."""
+        """Persists updated ZoneProfile from api.VDAT to disk and triggers live reload."""
         try:
             lanes = zones_cfg.get("lanes") or []
             intersection = zones_cfg.get("intersection") or []
+            exit_zones = zones_cfg.get("exitZones") or zones_cfg.get("exit_zones") or []
             light_box = zones_cfg.get("lightBox") or zones_cfg.get("traffic_lights") or []
+            crossing_mode = bool(zones_cfg.get("crossingMode") or zones_cfg.get("crossing_mode") or False)
+            raw_clearance = zones_cfg.get("clearanceSeconds")
+            if raw_clearance is None:
+                raw_clearance = zones_cfg.get("clearance_seconds")
+            clearance_seconds = float(raw_clearance if raw_clearance is not None else 3.0)
+
             payload = {
                 "lanes": lanes,
                 "intersection": intersection,
+                "exit_zones": exit_zones,
                 "traffic_lights": light_box if isinstance(light_box, list) else [],
+                "crossing_mode": crossing_mode,
+                "clearance_seconds": clearance_seconds,
             }
             os.makedirs(os.path.dirname(self.zones_file) or ".", exist_ok=True)
             with open(self.zones_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
             print(
                 f"[{self.camera_id}] Synced zones from {source}: "
-                f"{len(lanes)} lane(s), {len(intersection)} intersection pts, "
-                f"{len(payload['traffic_lights'])} light point(s)"
+                f"{len(lanes)} approach lane(s), {len(intersection)} intersection pts, "
+                f"{len(exit_zones)} exit zone(s), {len(payload['traffic_lights'])} light point(s), "
+                f"crossing_mode={crossing_mode}"
             )
             if callable(self.on_zone_update):
                 self.on_zone_update(self.zones_file)
         except Exception as e:
-            print(f"[WebSocketSink] Failed to apply remote zones: {e}")
+            print(f"[{self.camera_id}] Failed to apply remote zones: {e}")
 
     def _upload_clip_worker(
         self,

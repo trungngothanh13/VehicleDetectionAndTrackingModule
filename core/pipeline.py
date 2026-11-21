@@ -53,6 +53,17 @@ class TrafficPipeline:
         except Exception:
             pass
 
+    def reset_state(self) -> None:
+        """Resets tracker IDs, zone crossing history, violation set, and evidence buffer on source switch."""
+        if self.tracker is not None and hasattr(self.tracker, 'reset'):
+            self.tracker.reset()
+        if self.zone_checker is not None:
+            self.zone_checker.reset()
+        self.violations.clear()
+        if self._evidence_recorder is not None:
+            self._evidence_recorder.clear_buffers()
+        print(f"🧹 [{self.camera_id}] Pipeline state & rolling evidence buffer reset for new source")
+
     def reload_zones(self, zones_file: str) -> None:
         """Dynamically reloads ZoneChecker and TrafficLightDetector when zones are updated remotely."""
         try:
@@ -62,17 +73,20 @@ class TrafficPipeline:
             self.light_detector = new_light_detector
             light_count = len(new_light_detector.traffic_lights) if new_light_detector else 0
             print(
-                f"🔄 [AI Zones] Applied live zone update from {zones_file}: "
-                f"{len(new_zone_checker.lanes)} lane(s), "
+                f"🔄 [{self.camera_id}] Applied live zone update from {zones_file}: "
+                f"{len(new_zone_checker.lanes)} approach lane(s), "
                 f"{len(new_zone_checker.intersection)} intersection pts, "
-                f"{light_count} traffic light point(s)"
+                f"{len(new_zone_checker.exit_zones)} exit zone(s), "
+                f"{light_count} light point(s), "
+                f"crossing_mode={new_zone_checker.crossing_mode} ({new_zone_checker.clearance_seconds}s grace)"
             )
         except Exception as e:
-            print(f"[Pipeline] Error reloading zones from {zones_file}: {e}")
+            print(f"[{self.camera_id}] Error reloading zones from {zones_file}: {e}")
 
     def request_reader_switch(self, new_reader: BaseFrameReader, source_label: str = "new source") -> None:
-        """Queues a hot-swap of the active frame ingestion reader without restarting YOLO/ByteTrack."""
-        print(f"🎬 [Pipeline] Queued hot-switch to camera input source: {source_label}")
+        """Queues a hot-swap of the active frame ingestion reader without restarting YOLO."""
+        print(f"🎬 [{self.camera_id}] Queued hot-switch to camera input source: {source_label}")
+        self.reset_state()
         self._pending_reader = new_reader
         try:
             self.reader.release()
@@ -183,6 +197,8 @@ class TrafficPipeline:
 
                 # 3. Zone Violation Evaluation
                 new_violations: List[ViolationEvent] = []
+                if self.zone_checker:
+                    self.zone_checker.update_light_state(light_state, frame_count, fps)
                 if self.zone_checker and tracked.tracker_id is not None:
                     light_is_red = (light_state == 'red')
                     for i in range(len(tracked)):
@@ -193,7 +209,13 @@ class TrafficPipeline:
                         tracker_id = int(tracked.tracker_id[i])
                         bbox = tracked.xyxy[i]
 
-                        if self.zone_checker.check_lane_to_intersection(tracker_id, bbox, light_is_red):
+                        if self.zone_checker.check_lane_to_intersection(
+                            tracker_id,
+                            bbox,
+                            light_is_red=light_is_red,
+                            frame_number=frame_count,
+                            fps=fps,
+                        ):
                             if tracker_id not in self.violations:
                                 self.violations.add(tracker_id)
                                 class_name = self.tracker.get_class_name(class_id)
@@ -214,7 +236,7 @@ class TrafficPipeline:
                                 )
                                 new_violations.append(event)
                                 self.violation_events.append(event)
-                                print(f"🚨 [VIOLATION] Vehicle #{tracker_id} ({class_name}) at Frame {frame_count} ({timestamp_str})")
+                                print(f"🚨 [{self.camera_id}] [VIOLATION] Vehicle #{tracker_id} ({class_name}) at Frame {frame_count} ({timestamp_str})")
 
                 # 4. Drawing & HUD Visualization
                 if self.zone_checker:
@@ -224,16 +246,13 @@ class TrafficPipeline:
                         self.zone_checker.lanes,
                         self.zone_checker.intersection,
                         lights,
+                        exit_zones=self.zone_checker.exit_zones,
                     )
 
                 frame = self.visualizer.draw_detections(frame, tracked, self.tracker, violation_ids=self.violations)
 
                 current_count = len(tracked) if tracked.tracker_id is not None else 0
                 total_tracked = self.tracker.get_total_tracked()
-
-                self.visualizer.set_violations_count(len(self.violations))
-                self.visualizer.set_light_state(light_state)
-                frame = self.visualizer.draw_statistics(frame, current_count, total_tracked, frame_count)
 
                 # 5. Buffer frame for evidence (if not already hooked into reader)
                 if not self._raw_consumer_registered:

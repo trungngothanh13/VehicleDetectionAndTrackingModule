@@ -94,6 +94,12 @@ class EvidenceRecorder:
             )
             self._pending[event.track_id] = clip
 
+    def clear_buffers(self) -> None:
+        """Clears the rolling pre-trigger buffer and any pending clips on source switch."""
+        with self._lock:
+            self._buffer.clear()
+            self._pending.clear()
+
     def flush(self) -> None:
         """
         Finalize any in-progress clips (e.g., video ended before post-trigger

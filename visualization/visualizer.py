@@ -124,8 +124,9 @@ class Visualizer:
         lanes: list,
         intersection: list,
         traffic_lights: Optional[list] = None,
+        exit_zones: Optional[list] = None,
     ) -> np.ndarray:
-        """Draw lanes, intersection, and traffic light sampling boxes on frame."""
+        """Draw Approach Lanes, Intersection, Exit Zones, and Traffic Light boxes on frame."""
         for lane in lanes:
             if len(lane) >= 3:
                 pts = np.array(lane, dtype=np.int32)
@@ -135,13 +136,29 @@ class Visualizer:
             pts = np.array(intersection, dtype=np.int32)
             cv2.polylines(frame, [pts], True, (255, 255, 0), 2)
 
+        if exit_zones:
+            for idx, ez in enumerate(exit_zones):
+                if len(ez) >= 3:
+                    pts = np.array(ez, dtype=np.int32)
+                    cv2.polylines(frame, [pts], True, (0, 140, 255), 2)
+                    x0, y0 = int(pts[0][0]), int(pts[0][1])
+                    cv2.putText(
+                        frame,
+                        f"EXIT {idx + 1}",
+                        (x0 + 4, max(14, y0 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.42,
+                        (0, 140, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+
         if traffic_lights:
             for light in traffic_lights:
                 lx = int(light.get('x', 0))
                 ly = int(light.get('y', 0))
                 lcolor = str(light.get('color', 'red')).lower()
                 bgr = (0, 255, 0) if lcolor == 'green' else (0, 0, 255)
-                cv2.rectangle(frame, (lx - 12, ly - 12), (lx + 12, ly + 12), bgr, 2)
                 cv2.circle(frame, (lx, ly), 3, bgr, -1)
 
         return frame

@@ -17,6 +17,7 @@ from spatial import ZoneChecker
 from traffic_light import TrafficLightDetector
 from visualization import Visualizer
 from trackers import create_tracker
+from trackers.base_tracker import BatchModelRunner
 from sinks import FileSink, WebSocketSink, PreviewSink
 from zone_drawer import ZoneDrawer
 
@@ -152,7 +153,7 @@ def main():
         return
 
 def resolve_camera_ids(args, config: Config) -> List[str]:
-    """Parses --cameras (space or comma separated), defaulting to 3 web slots in --web-input mode."""
+    """Parses --cameras (space or comma separated), defaulting to 6 web slots (cam-01..cam-06) in --web-input mode."""
     if args.cameras:
         ids: List[str] = []
         for item in args.cameras:
@@ -165,7 +166,7 @@ def resolve_camera_ids(args, config: Config) -> List[str]:
 
     input_source = str(config.INPUT_VIDEO).strip().lower()
     if args.web_input or input_source in ("ws", "web", "websocket"):
-        return ["cam-01", "cam-02", "cam-03"]
+        return ["cam-01", "cam-02", "cam-03", "cam-04", "cam-05", "cam-06"]
 
     return [config.CAMERA_ID]
 
@@ -187,8 +188,8 @@ def build_session_reader(camera_id: str, config: Config, is_primary: bool):
 
     # Additional camera slots wait for WebSocket frames when started alongside a primary local source
     if is_ws_ingest or not is_primary:
-        print(f"[{camera_id}] Ingestion: WebSocketFrameReader ready (waiting for Web UI frames)")
-        return WebSocketFrameReader(width=854, height=480, fps=30), "ws", True
+        print(f"[{camera_id}] Ingestion: WebSocketFrameReader ready (waiting for Web UI frames @ 15 FPS)")
+        return WebSocketFrameReader(width=854, height=480, fps=15), "ws", True
 
     is_webcam = (
         input_source.isdigit()
@@ -249,14 +250,18 @@ def create_camera_session(
         if config.SAVE_OUTPUT_VIDEO and not is_ws_ingest
         else None
     )
-    violation_log_path = os.path.join(config.OUTPUT_DIR, f"{config.TRACKER_TYPE}_{camera_id}.txt")
+    violation_log_path = (
+        os.path.join(config.OUTPUT_DIR, f"{config.TRACKER_TYPE}_{camera_id}.txt")
+        if config.SAVE_VIOLATION_LOG and not is_ws_ingest
+        else None
+    )
 
     file_sink = FileSink(
         output_video_path=output_video_path,
         violation_log_path=violation_log_path,
         evidence_dir=getattr(config, 'EVIDENCE_DIR', 'output/evidence'),
         save_video=config.SAVE_OUTPUT_VIDEO and not is_ws_ingest,
-        save_log=config.SAVE_VIOLATION_LOG,
+        save_log=config.SAVE_VIOLATION_LOG and not is_ws_ingest,
         save_evidence=getattr(config, 'SAVE_EVIDENCE_SNAPSHOTS', True),
     )
     sinks.append(file_sink)
@@ -303,9 +308,10 @@ def create_camera_session(
                 if isinstance(pipeline.reader, WebSocketFrameReader) and pipeline._pending_reader is None:
                     ws_sink.on_ingest_frame = pipeline.reader.push_frame
                     ws_sink.ingest_mode = "ws"
-                    print(f"🎬 [{camera_id}] Active WebSocketFrameReader ready for Web-Fed Stream: {source_val}")
+                    pipeline.reset_state()
+                    print(f"🎬 [{camera_id}] Active WebSocketFrameReader reset & ready for Web-Fed Stream: {source_val}")
                 else:
-                    new_ws_reader = WebSocketFrameReader(width=854, height=480, fps=30)
+                    new_ws_reader = WebSocketFrameReader(width=854, height=480, fps=15)
                     ws_sink.on_ingest_frame = new_ws_reader.push_frame
                     ws_sink.ingest_mode = "ws"
                     pipeline.request_reader_switch(new_ws_reader, f"Web-Fed Stream ({source_val})")
@@ -370,30 +376,34 @@ def main():
     if len(camera_ids) > 1:
         config.ENABLE_WEBSOCKET_STREAM = True
 
-    print(f"🧠 [AI Core] Loading shared YOLO model '{config.MODEL_NAME}' for cameras: {camera_ids}")
-    shared_model = YOLO(config.MODEL_NAME)
+    print(f"🧠 [AI Core] Loading shared YOLO model '{config.MODEL_NAME}' with Micro-Batcher for cameras: {camera_ids}")
+    raw_model = YOLO(config.MODEL_NAME)
+    batch_runner = BatchModelRunner(raw_model, max_batch_size=max(8, len(camera_ids)), max_wait_sec=0.004)
     model_lock = threading.Lock()
 
     if len(camera_ids) == 1:
-        pipeline = create_camera_session(
-            camera_id=camera_ids[0],
-            config=config,
-            shared_model=shared_model,
-            model_lock=model_lock,
-            is_primary=True,
-            enable_preview=config.SHOW_LIVE_PREVIEW,
-        )
-        pipeline.run()
+        try:
+            pipeline = create_camera_session(
+                camera_id=camera_ids[0],
+                config=config,
+                shared_model=batch_runner,
+                model_lock=model_lock,
+                is_primary=True,
+                enable_preview=config.SHOW_LIVE_PREVIEW,
+            )
+            pipeline.run()
+        finally:
+            batch_runner.stop()
         return
 
-    # Multi-camera concurrent sessions sharing the single loaded YOLO model
+    # Multi-camera concurrent sessions sharing the single loaded YOLO model via BatchModelRunner
     sessions: List[TrafficPipeline] = []
     threads: List[threading.Thread] = []
     for idx, cam_id in enumerate(camera_ids):
         session = create_camera_session(
             camera_id=cam_id,
             config=config,
-            shared_model=shared_model,
+            shared_model=batch_runner,
             model_lock=model_lock,
             is_primary=(idx == 0),
             enable_preview=False,
@@ -403,7 +413,7 @@ def main():
         threads.append(t)
         t.start()
 
-    print(f"🚀 [AI Core] {len(sessions)} concurrent camera session(s) active on 1 shared YOLO model.")
+    print(f"🚀 [AI Core] {len(sessions)} concurrent camera session(s) active on 1 micro-batched YOLO model.")
     try:
         for t in threads:
             while t.is_alive():
@@ -414,6 +424,8 @@ def main():
             s.stop()
         for t in threads:
             t.join(timeout=2.0)
+    finally:
+        batch_runner.stop()
 
 
 if __name__ == "__main__":

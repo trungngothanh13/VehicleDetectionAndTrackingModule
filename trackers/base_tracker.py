@@ -1,8 +1,111 @@
 from abc import ABC, abstractmethod
-import os
+from collections import deque
+from concurrent.futures import Future
+import queue
 import threading
+import time
 import numpy as np
 import supervision as sv
+
+
+class BatchModelRunner:
+    """
+    Coordinates micro-batched GPU inference across multiple concurrent CameraSession
+    threads sharing a single loaded Ultralytics YOLO model instance.
+    Collects up to `max_batch_size` same-shape frames arriving within `max_wait_sec`
+    and executes one batched `model.predict(..., half=...)` pass on GPU.
+    """
+
+    def __init__(
+        self,
+        model,
+        max_batch_size: int = 8,
+        max_wait_sec: float = 0.004,
+    ):
+        self.model = model
+        self.max_batch_size = max_batch_size
+        self.max_wait_sec = max_wait_sec
+        try:
+            import torch
+            self.use_half = bool(torch.cuda.is_available())
+        except Exception:
+            self.use_half = False
+
+        self._queue: queue.Queue = queue.Queue()
+        self._leftovers: deque = deque()
+        self._stopped = False
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            name="YOLO-MicroBatcher",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def predict_one(self, frame: np.ndarray, conf: float, imgsz: int):
+        """Enqueues a frame for micro-batched inference and returns its Result."""
+        fut: Future = Future()
+        self._queue.put((frame, conf, imgsz, fut))
+        return fut.result()
+
+    def stop(self) -> None:
+        self._stopped = True
+        self._queue.put(None)
+        if self._worker.is_alive():
+            self._worker.join(timeout=1.0)
+
+    def _next_item(self):
+        if self._leftovers:
+            return self._leftovers.popleft()
+        return self._queue.get()
+
+    def _worker_loop(self) -> None:
+        while not self._stopped:
+            first = self._next_item()
+            if first is None:
+                break
+
+            batch = [first]
+            first_frame, first_conf, first_imgsz, _ = first
+            target_shape = first_frame.shape[:2]
+
+            deadline = time.monotonic() + self.max_wait_sec
+            while len(batch) < self.max_batch_size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    item = self._queue.get(timeout=remaining)
+                except queue.Empty:
+                    break
+
+                if item is None:
+                    self._stopped = True
+                    break
+
+                f, c, sz, _ = item
+                if f.shape[:2] == target_shape and c == first_conf and sz == first_imgsz:
+                    batch.append(item)
+                else:
+                    self._leftovers.append(item)
+                    break
+
+            frames = [item[0] for item in batch]
+            futures = [item[3] for item in batch]
+            try:
+                results = self.model.predict(
+                    frames,
+                    conf=first_conf,
+                    imgsz=first_imgsz,
+                    half=self.use_half,
+                    verbose=False,
+                )
+                for fut, res in zip(futures, results):
+                    if not fut.done():
+                        fut.set_result(res)
+            except Exception as exc:
+                for fut in futures:
+                    if not fut.done():
+                        fut.set_exception(exc)
 
 
 class BaseTracker(ABC):
@@ -30,7 +133,15 @@ class BaseTracker(ABC):
         self._seen_ids = set()
 
     def _run_model_predict(self, frame: np.ndarray):
-        """Executes stateless YOLO detection under the shared model lock when provided."""
+        """Executes YOLO detection via BatchModelRunner or thread-locked YOLO model."""
+        if isinstance(self._shared_model, BatchModelRunner):
+            return [
+                self._shared_model.predict_one(
+                    frame,
+                    conf=self.confidence_threshold,
+                    imgsz=self.imgsz,
+                )
+            ]
         if self._model_lock is not None:
             with self._model_lock:
                 return self.model.predict(
@@ -50,12 +161,6 @@ class BaseTracker(ABC):
     def track(self, frame: np.ndarray) -> sv.Detections:
         """
         Process a single video frame. Detect and track vehicles.
-        
-        Args:
-            frame: np.ndarray (BGR image)
-            
-        Returns:
-            sv.Detections: Object with xyxy, confidence, class_id, and tracker_id.
         """
         pass
 
@@ -75,8 +180,7 @@ class BaseTracker(ABC):
 class UltralyticsMotTracker(BaseTracker):
     """
     Shared base for Ultralytics MOT trackers (ByteTrack, BoT-SORT) that decouples
-    stateless YOLO object detection (sharable across multiple camera sessions)
-    from per-camera stateful object tracking.
+    micro-batched YOLO object detection from per-camera stateful object tracking.
     """
 
     def __init__(
@@ -107,7 +211,10 @@ class UltralyticsMotTracker(BaseTracker):
 
         self.tracker_type = tracker_type
         self.tracker_yaml = tracker_yaml if tracker_yaml else default_yaml_path
-        self.model = shared_model if shared_model is not None else YOLO(self.model_name)
+        if isinstance(shared_model, BatchModelRunner):
+            self.model = shared_model.model
+        else:
+            self.model = shared_model if shared_model is not None else YOLO(self.model_name)
 
         cfg = IterableSimpleNamespace(**YAML.load(self.tracker_yaml))
         self._tracker_cfg = cfg
@@ -115,7 +222,7 @@ class UltralyticsMotTracker(BaseTracker):
         self._tracker = self._tracker_cls(args=self._tracker_cfg)
 
     def track(self, frame: np.ndarray) -> sv.Detections:
-        """Runs shared YOLO detection then updates this camera session's isolated tracker."""
+        """Runs shared/batched YOLO detection then updates this camera session's isolated tracker."""
         results = self._run_model_predict(frame)
         result = results[0]
 

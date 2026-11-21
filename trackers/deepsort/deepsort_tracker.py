@@ -4,7 +4,7 @@ import numpy as np
 import supervision as sv
 from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
-from trackers.base_tracker import BaseTracker
+from trackers.base_tracker import BaseTracker, BatchModelRunner
 
 
 class DeepSortTracker(BaseTracker):
@@ -16,7 +16,7 @@ class DeepSortTracker(BaseTracker):
 
     def __init__(
         self,
-        model_name: str = 'yolov8l.pt',
+        model_name: str = 'yolo26l.pt',
         target_classes: dict = None,
         confidence_threshold: float = 0.30,
         imgsz: int = 1280,
@@ -61,7 +61,10 @@ class DeepSortTracker(BaseTracker):
         half = kwargs.get('half', yaml_config.get('half', True))
         embedder_gpu = kwargs.get('embedder_gpu', yaml_config.get('embedder_gpu', True))
 
-        self.model = shared_model if shared_model is not None else YOLO(self.model_name)
+        if isinstance(shared_model, BatchModelRunner):
+            self.model = shared_model.model
+        else:
+            self.model = shared_model if shared_model is not None else YOLO(self.model_name)
         self.use_reid = use_reid
         self.half = half
 
