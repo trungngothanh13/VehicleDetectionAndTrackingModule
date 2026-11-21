@@ -162,8 +162,82 @@ class WebSocketSink(BaseSink):
         except Exception:
             pass
 
+    def _handle_control_message(self, data: Dict[str, Any]) -> None:
+        """Handles non-frame WebSocket messages from api.VDAT."""
+        msg_type = data.get("type")
+
+        if msg_type == "request_clip_upload":
+            filename = data.get("filename")
+            if filename:
+                t = threading.Thread(
+                    target=self._upload_clip_worker,
+                    args=(filename,),
+                    daemon=True,
+                )
+                t.start()
+        elif msg_type == "delete_evidence_clip":
+            filename = data.get("filename")
+            if filename:
+                self._delete_local_clip(filename)
+        elif msg_type == "camera_ack":
+            print(
+                f"✅ [AI Engine] Registered with api.VDAT for camera '{self.camera_id}' "
+                f"(ingest_mode={self.ingest_mode})"
+            )
+            zones = data.get("zones")
+            if zones:
+                self._apply_remote_zones(zones, source="camera_ack")
+        elif msg_type == "zone_update":
+            zones = data.get("zones")
+            if zones is not None:
+                self._apply_remote_zones(zones, source="zone_update")
+        elif msg_type == "switch_source":
+            print(
+                f"🎬 [{self.camera_id}] Switching input source -> "
+                f"type='{data.get('sourceType')}', value='{data.get('sourceValue')}'"
+            )
+            if callable(self.on_switch_source):
+                try:
+                    self.on_switch_source(data)
+                except Exception as e:
+                    print(f"[WebSocketSink] Error switching source: {e}")
+
+    def _process_ingest_frame(self, data: Dict[str, Any]) -> None:
+        """Decodes the latest ingested frame and pushes it into the camera reader."""
+        b64_img = data.get("image")
+        if not b64_img:
+            return
+
+        # Auto-switch pipeline to web_stream if it was started without --web-input
+        if not callable(self.on_ingest_frame) and callable(self.on_switch_source):
+            try:
+                print("🔄 [AI Ingestion] Web frame detected — switching AI reader to web_stream...")
+                self.on_switch_source({
+                    "sourceType": "web_stream",
+                    "sourceValue": data.get("sourceType", "web_stream"),
+                })
+                self.ingest_mode = "ws"
+            except Exception as e:
+                print(f"[WebSocketSink] Auto-switch to web_stream failed: {e}")
+
+        if callable(self.on_ingest_frame):
+            try:
+                raw_bytes = base64.b64decode(b64_img)
+                arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+                decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if decoded is not None:
+                    self._ingested_frames += 1
+                    if self._ingested_frames == 1 or self._ingested_frames % 30 == 0:
+                        print(
+                            f"📥 [{self.camera_id}] AI Ingestion frame #{self._ingested_frames} received "
+                            f"({decoded.shape[1]}x{decoded.shape[0]})"
+                        )
+                    self.on_ingest_frame(decoded)
+            except Exception as e:
+                print(f"[{self.camera_id}] Error decoding ingest_frame: {e}")
+
     def _reader_loop(self, ws: Any) -> None:
-        """Background thread listening for incoming server commands (e.g. on-demand clip requests)."""
+        """Background thread listening for incoming server commands and draining stale ingest frames."""
         while not self._stopped:
             try:
                 raw_msg = ws.recv(timeout=1.0)
@@ -172,71 +246,30 @@ class WebSocketSink(BaseSink):
                 data = json.loads(raw_msg)
                 msg_type = data.get("type")
 
-                if msg_type == "request_clip_upload":
-                    filename = data.get("filename")
-                    if filename:
-                        t = threading.Thread(
-                            target=self._upload_clip_worker,
-                            args=(filename,),
-                            daemon=True
-                        )
-                        t.start()
-                elif msg_type == "delete_evidence_clip":
-                    filename = data.get("filename")
-                    if filename:
-                        self._delete_local_clip(filename)
-                elif msg_type == "camera_ack":
-                    print(
-                        f"✅ [AI Engine] Registered with api.VDAT for camera '{self.camera_id}' "
-                        f"(ingest_mode={self.ingest_mode})"
-                    )
-                    zones = data.get("zones")
-                    if zones:
-                        self._apply_remote_zones(zones, source="camera_ack")
-                elif msg_type == "zone_update":
-                    zones = data.get("zones")
-                    if zones is not None:
-                        self._apply_remote_zones(zones, source="zone_update")
-                elif msg_type == "ingest_frame":
-                    b64_img = data.get("image")
-                    if b64_img:
-                        # Auto-switch pipeline to web_stream if it was started without --web-input
-                        if not callable(self.on_ingest_frame) and callable(self.on_switch_source):
-                            try:
-                                print("🔄 [AI Ingestion] Web frame detected — switching AI reader to web_stream...")
-                                self.on_switch_source({
-                                    "sourceType": "web_stream",
-                                    "sourceValue": data.get("sourceType", "web_stream"),
-                                })
-                                self.ingest_mode = "ws"
-                            except Exception as e:
-                                print(f"[WebSocketSink] Auto-switch to web_stream failed: {e}")
+                if msg_type != "ingest_frame":
+                    self._handle_control_message(data)
+                    continue
 
-                        if callable(self.on_ingest_frame):
-                            try:
-                                raw_bytes = base64.b64decode(b64_img)
-                                arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-                                decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                                if decoded is not None:
-                                    self._ingested_frames += 1
-                                    if self._ingested_frames == 1 or self._ingested_frames % 30 == 0:
-                                        print(
-                                            f"📥 [{self.camera_id}] AI Ingestion frame #{self._ingested_frames} received "
-                                            f"({decoded.shape[1]}x{decoded.shape[0]})"
-                                        )
-                                    self.on_ingest_frame(decoded)
-                            except Exception as e:
-                                print(f"[{self.camera_id}] Error decoding ingest_frame: {e}")
-                elif msg_type == "switch_source":
-                    print(
-                        f"🎬 [{self.camera_id}] Switching input source -> "
-                        f"type='{data.get('sourceType')}', value='{data.get('sourceValue')}'"
-                    )
-                    if callable(self.on_switch_source):
-                        try:
-                            self.on_switch_source(data)
-                        except Exception as e:
-                            print(f"[WebSocketSink] Error switching source: {e}")
+                # Drain immediately buffered messages so only the freshest ingest_frame is decoded
+                latest_ingest: Optional[Dict[str, Any]] = data
+                while not self._stopped:
+                    try:
+                        queued_raw = ws.recv(timeout=0)
+                    except TimeoutError:
+                        break
+                    if not queued_raw:
+                        continue
+                    queued_data = json.loads(queued_raw)
+                    queued_type = queued_data.get("type")
+                    if queued_type == "ingest_frame":
+                        latest_ingest = queued_data
+                    else:
+                        if queued_type == "switch_source":
+                            latest_ingest = None
+                        self._handle_control_message(queued_data)
+
+                if latest_ingest is not None:
+                    self._process_ingest_frame(latest_ingest)
             except TimeoutError:
                 continue
             except Exception:
@@ -337,7 +370,15 @@ class WebSocketSink(BaseSink):
         """Background worker thread that manages the WebSocket client connection."""
         while not self._stopped:
             try:
-                with ws_sync.connect(self.ws_url) as ws:
+                with ws_sync.connect(
+                    self.ws_url,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    close_timeout=2,
+                    max_size=16 * 1024 * 1024,
+                    max_queue=32,
+                    compression=None,
+                ) as ws:
                     print(f"🔌 [WebSocketSink] Connected to {self.ws_url}")
 
                     # Always send camera_init immediately upon connecting or reconnecting

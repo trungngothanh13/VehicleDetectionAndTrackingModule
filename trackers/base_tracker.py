@@ -13,7 +13,7 @@ class BatchModelRunner:
     Coordinates micro-batched GPU inference across multiple concurrent CameraSession
     threads sharing a single loaded Ultralytics YOLO model instance.
     Collects up to `max_batch_size` same-shape frames arriving within `max_wait_sec`
-    and executes one batched `model.predict(..., half=...)` pass on GPU.
+    and executes one batched `model.predict(..., **precision_kwargs)` pass on GPU.
     """
 
     def __init__(
@@ -30,6 +30,31 @@ class BatchModelRunner:
             self.use_half = bool(torch.cuda.is_available())
         except Exception:
             self.use_half = False
+
+        try:
+            from ultralytics.cfg import DEFAULT_CFG_DICT
+            has_quantize = "quantize" in DEFAULT_CFG_DICT
+        except Exception:
+            has_quantize = False
+
+        self._predict_precision_kwargs = (
+            ({"quantize": 16} if has_quantize else {"half": True})
+            if self.use_half
+            else {}
+        )
+
+        # Warm up model, CUDA kernels, and layer fusion before WebSocket workers connect
+        try:
+            dummy_frame = np.zeros((480, 854, 3), dtype=np.uint8)
+            self.model.predict(
+                [dummy_frame],
+                conf=0.3,
+                imgsz=1280,
+                verbose=False,
+                **self._predict_precision_kwargs,
+            )
+        except Exception as exc:
+            print(f"[YOLO-MicroBatcher] Warmup skipped: {exc}")
 
         self._queue: queue.Queue = queue.Queue()
         self._leftovers: deque = deque()
@@ -96,8 +121,8 @@ class BatchModelRunner:
                     frames,
                     conf=first_conf,
                     imgsz=first_imgsz,
-                    half=self.use_half,
                     verbose=False,
+                    **self._predict_precision_kwargs,
                 )
                 for fut, res in zip(futures, results):
                     if not fut.done():
