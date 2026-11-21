@@ -26,9 +26,12 @@ class BatchModelRunner:
         self.model = model
         self.max_batch_size = max_batch_size
         self.max_wait_sec = max_wait_sec
+        device_desc = "CPU (CUDA unavailable)"
         try:
             import torch
             self.use_half = bool(torch.cuda.is_available())
+            if self.use_half:
+                device_desc = f"CUDA ({torch.cuda.get_device_name(0)})"
         except Exception:
             self.use_half = False
 
@@ -45,6 +48,7 @@ class BatchModelRunner:
         )
 
         # Warm up model, CUDA kernels, and layer fusion before WebSocket workers connect
+        t_warm = time.perf_counter()
         try:
             dummy_frame = np.zeros((480, 854, 3), dtype=np.uint8)
             self.model.predict(
@@ -54,8 +58,18 @@ class BatchModelRunner:
                 verbose=False,
                 **self._predict_precision_kwargs,
             )
+            warm_ms = (time.perf_counter() - t_warm) * 1000.0
+            print(
+                f"🚀 [YOLO-MicroBatcher] Device: {device_desc} | "
+                f"precision={self._predict_precision_kwargs or 'FP32'} | "
+                f"warmup({warmup_imgsz}px)={warm_ms:.0f}ms"
+            )
         except Exception as exc:
-            print(f"[YOLO-MicroBatcher] Warmup skipped: {exc}")
+            print(f"[YOLO-MicroBatcher] Warmup skipped ({device_desc}): {exc}")
+
+        self._batch_count = 0
+        self._batch_frames_sum = 0
+        self._batch_gpu_ms_sum = 0.0
 
         self._queue: queue.Queue = queue.Queue()
         self._leftovers: deque = deque()
@@ -117,6 +131,7 @@ class BatchModelRunner:
 
             frames = [item[0] for item in batch]
             futures = [item[3] for item in batch]
+            t0 = time.perf_counter()
             try:
                 results = self.model.predict(
                     frames,
@@ -125,6 +140,22 @@ class BatchModelRunner:
                     verbose=False,
                     **self._predict_precision_kwargs,
                 )
+                gpu_ms = (time.perf_counter() - t0) * 1000.0
+                self._batch_count += 1
+                self._batch_frames_sum += len(frames)
+                self._batch_gpu_ms_sum += gpu_ms
+                if self._batch_count % 120 == 0:
+                    avg_b = self._batch_frames_sum / self._batch_count
+                    avg_ms = self._batch_gpu_ms_sum / self._batch_count
+                    cap_fps = (avg_b * 1000.0 / avg_ms) if avg_ms > 0 else 0.0
+                    print(
+                        f"⚡ [YOLO-MicroBatcher] {self._batch_count} batches: "
+                        f"avg_batch={avg_b:.2f} frames, avg_infer={avg_ms:.1f}ms "
+                        f"(GPU capacity ~{cap_fps:.0f} FPS)"
+                    )
+                    self._batch_count = 0
+                    self._batch_frames_sum = 0
+                    self._batch_gpu_ms_sum = 0.0
                 for fut, res in zip(futures, results):
                     if not fut.done():
                         fut.set_result(res)

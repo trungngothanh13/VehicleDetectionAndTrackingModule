@@ -1,5 +1,6 @@
 import cv2
 import threading
+from collections import deque
 from typing import Tuple, Optional, Callable
 import numpy as np
 
@@ -11,14 +12,16 @@ class WebSocketFrameReader(BaseFrameReader):
     Ingests live camera frames streamed from the web frontend (either a browser-fed
     video file acting as a standalone camera stream or the user's laptop webcam via WebRTC/Canvas)
     relayed through api.VDAT over WebSocket.
+    Uses a small 3-frame ring buffer so WAN TCP jitter bursts are processed smoothly
+    without overwriting back-to-back frames, while strictly preventing latency buildup.
     """
 
-    def __init__(self, width: int = 854, height: int = 480, fps: int = 30):
+    def __init__(self, width: int = 854, height: int = 480, fps: int = 30, buffer_size: int = 3):
         self._width = width
         self._height = height
         self._fps = fps
         self._stopped = False
-        self._latest_frame: Optional[np.ndarray] = None
+        self._frames: deque = deque(maxlen=max(1, buffer_size))
         self._frame_count = 0
         self._lock = threading.Lock()
         self._new_frame_event = threading.Event()
@@ -46,17 +49,18 @@ class WebSocketFrameReader(BaseFrameReader):
                 print(f"[WebSocketFrameReader] Raw consumer error: {e}")
 
         with self._lock:
-            self._latest_frame = frame
+            self._frames.append(frame)
             self._new_frame_event.set()
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         while not self._stopped:
-            if self._new_frame_event.wait(timeout=1.0):
-                self._new_frame_event.clear()
-                with self._lock:
-                    frame = self._latest_frame
-                if frame is not None:
+            with self._lock:
+                if self._frames:
+                    frame = self._frames.popleft()
+                    if not self._frames:
+                        self._new_frame_event.clear()
                     return True, frame
+            self._new_frame_event.wait(timeout=1.0)
         return False, None
 
     @property

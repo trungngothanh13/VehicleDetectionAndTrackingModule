@@ -88,6 +88,7 @@ class WebSocketSink(BaseSink):
         self._frame_lock = threading.Lock()
         self._latest_frame: Optional[Tuple[Optional[np.ndarray], Dict[str, Any]]] = None
         self._pending_acked_frames = 0
+        self._last_received_seq = 0
         self._wake_event = threading.Event()
 
         self._stopped = False
@@ -295,8 +296,13 @@ class WebSocketSink(BaseSink):
                     self._handle_control_message(data)
                     continue
 
-                # Drain immediately buffered messages so only the freshest frame is decoded
-                latest_ingest: Optional[Tuple[Dict[str, Any], Optional[bytes]]] = (data, jpeg_bytes)
+                seq = data.get("seq")
+                if isinstance(seq, int) and seq > self._last_received_seq:
+                    self._last_received_seq = seq
+
+                # Collect any immediately buffered burst frames (e.g. WAN TCP jitter burst)
+                # Keep up to the newest 2 frames for smooth tracker motion; drop older excess
+                burst: list = [(data, jpeg_bytes)]
                 skipped_frames = 0
                 while not self._stopped:
                     try:
@@ -311,24 +317,30 @@ class WebSocketSink(BaseSink):
                     queued_data, queued_jpeg = queued_parsed
                     queued_type = queued_data.get("type")
                     if queued_type in ("ingest_frame", "source_frame"):
-                        if latest_ingest is not None:
-                            skipped_frames += 1
-                        latest_ingest = (queued_data, queued_jpeg)
+                        q_seq = queued_data.get("seq")
+                        if isinstance(q_seq, int) and q_seq > self._last_received_seq:
+                            self._last_received_seq = q_seq
+                        burst.append((queued_data, queued_jpeg))
                     else:
-                        if queued_type == "switch_source" and latest_ingest is not None:
-                            skipped_frames += 1
-                            latest_ingest = None
+                        if queued_type == "switch_source":
+                            skipped_frames += len(burst)
+                            burst.clear()
                         self._handle_control_message(queued_data)
+
+                if len(burst) > 2:
+                    skipped_frames += len(burst) - 2
+                    burst = burst[-2:]
 
                 if skipped_frames > 0:
                     self._enqueue_priority({
                         "type": "frame_ack",
                         "cameraId": self.camera_id,
+                        "ackSeq": self._last_received_seq,
                         "count": skipped_frames,
                     })
 
-                if latest_ingest is not None:
-                    self._process_ingest_frame(latest_ingest[0], latest_ingest[1])
+                for frame_meta, frame_jpeg in burst:
+                    self._process_ingest_frame(frame_meta, frame_jpeg)
             except TimeoutError:
                 continue
             except Exception:
@@ -433,6 +445,7 @@ class WebSocketSink(BaseSink):
         acked_frames: int,
     ) -> None:
         """Encodes JPEG on the sender thread ONLY when focused; otherwise sends compact JSON telemetry."""
+        ack_seq = self._last_received_seq
         if frame_obj is not None and self._send_image:
             h, w = frame_obj.shape[:2]
             if self.max_width and w > self.max_width:
@@ -448,6 +461,7 @@ class WebSocketSink(BaseSink):
                         "type": "frame",
                         "cameraId": self.camera_id,
                         "telemetry": tel_dict,
+                        "ackSeq": ack_seq,
                         "ackedFrames": acked_frames,
                     },
                     buffer.tobytes(),
@@ -461,6 +475,7 @@ class WebSocketSink(BaseSink):
                             "cameraId": self.camera_id,
                             "telemetry": tel_dict,
                             "image": None,
+                            "ackSeq": ack_seq,
                             "ackedFrames": acked_frames,
                         },
                         separators=(",", ":"),
@@ -474,6 +489,7 @@ class WebSocketSink(BaseSink):
                         "cameraId": self.camera_id,
                         "telemetry": tel_dict,
                         "image": None,
+                        "ackSeq": ack_seq,
                         "ackedFrames": acked_frames,
                     },
                     separators=(",", ":"),
@@ -504,6 +520,7 @@ class WebSocketSink(BaseSink):
                     compression=None,
                 ) as ws:
                     print(f"🔌 [WebSocketSink] Connected to {self.ws_url}")
+                    self._last_received_seq = 0
 
                     # Register camera and receive latest ZoneProfile & initial stream focus state
                     ws.send(json.dumps(self._build_camera_init_packet()))
