@@ -12,7 +12,7 @@ echo "=== Installing system dependencies ==="
 sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg libgl1
 
 echo "=== Installing Python dependencies ==="
-pip install -q -r "$INIT_DIR/requirements.txt"
+pip install -q -U -r "$INIT_DIR/requirements.txt"
 
 echo "=== Downloading YOLO26l model ==="
 cd "$ROOT_DIR"
