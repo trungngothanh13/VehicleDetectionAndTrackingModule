@@ -16,21 +16,34 @@ class WebSocketFrameReader(BaseFrameReader):
     without overwriting back-to-back frames, while strictly preventing latency buildup.
     """
 
-    def __init__(self, width: int = 854, height: int = 480, fps: int = 30, buffer_size: int = 3):
+    def __init__(
+        self,
+        width: int = 854,
+        height: int = 480,
+        fps: int = 30,
+        buffer_size: int = 3,
+        on_drop_frame: Optional[Callable[[int], None]] = None,
+    ):
         self._width = width
         self._height = height
         self._fps = fps
         self._stopped = False
         self._frames: deque = deque(maxlen=max(1, buffer_size))
         self._frame_count = 0
+        self._last_frame_id: Optional[int] = None
+        self._on_drop_frame = on_drop_frame
         self._lock = threading.Lock()
         self._new_frame_event = threading.Event()
         self._raw_consumer: Optional[Callable[[np.ndarray, int], None]] = None
 
+    @property
+    def last_source_frame_id(self) -> Optional[int]:
+        return self._last_frame_id
+
     def register_raw_consumer(self, consumer: Optional[Callable[[np.ndarray, int], None]]) -> None:
         self._raw_consumer = consumer
 
-    def push_frame(self, frame: np.ndarray) -> None:
+    def push_frame(self, frame: np.ndarray, source_frame_id: Optional[int] = None) -> None:
         """Called by WebSocketSink when an 'ingest_frame' packet arrives from api.VDAT."""
         if self._stopped or frame is None:
             return
@@ -49,14 +62,22 @@ class WebSocketFrameReader(BaseFrameReader):
                 print(f"[WebSocketFrameReader] Raw consumer error: {e}")
 
         with self._lock:
-            self._frames.append(frame)
+            dropped = len(self._frames) == self._frames.maxlen
+            self._frames.append((frame, source_frame_id))
             self._new_frame_event.set()
+
+        if dropped and callable(self._on_drop_frame):
+            try:
+                self._on_drop_frame(1)
+            except Exception:
+                pass
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         while not self._stopped:
             with self._lock:
                 if self._frames:
-                    frame = self._frames.popleft()
+                    frame, source_frame_id = self._frames.popleft()
+                    self._last_frame_id = source_frame_id
                     if not self._frames:
                         self._new_frame_event.clear()
                     return True, frame

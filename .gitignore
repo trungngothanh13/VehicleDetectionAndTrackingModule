@@ -231,6 +231,7 @@ yolo26l.pt
 *.mkv
 *.mov
 *.webm
+temp_videos/
 
 # Zone configurations
 zones.json

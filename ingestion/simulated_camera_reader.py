@@ -1,4 +1,5 @@
 import cv2
+import os
 import time
 import threading
 from typing import Tuple, Optional, Callable
@@ -20,9 +21,22 @@ class SimulatedCameraReader(BaseFrameReader):
     receives every frame at the native frame rate.
     """
 
-    def __init__(self, file_path: str, loop: bool = False):
+    def __init__(
+        self,
+        file_path: str,
+        loop: bool = False,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+        delete_on_release: bool = False,
+        on_eof: Optional[Callable[[], None]] = None,
+    ):
         self.file_path = file_path
-        self.loop = loop
+        self.loop = bool(loop)
+        self._target_width = int(target_width) if target_width else None
+        self._target_height = int(target_height) if target_height else None
+        self._delete_on_release = bool(delete_on_release)
+        self._on_eof = on_eof
+        self._released = False
         self._stopped = False
         self._latest_frame: Optional[np.ndarray] = None
         self._latest_frame_idx: int = 0
@@ -36,12 +50,17 @@ class SimulatedCameraReader(BaseFrameReader):
             raise RuntimeError(f"Cannot open video file: {self.file_path}")
 
         self._fps = int(self._cap.get(cv2.CAP_PROP_FPS)) or 30
-        self._width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self._height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        native_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        native_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._width = self._target_width or native_w
+        self._height = self._target_height or native_h
         self._total_frames = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         self._thread = threading.Thread(target=self._pacing_loop, daemon=True)
         self._thread.start()
+
+    def set_loop(self, loop: bool) -> None:
+        self.loop = bool(loop)
 
     def register_raw_consumer(self, consumer: Optional[Callable[[np.ndarray, int], None]]) -> None:
         """Register a callback that receives every raw frame at native camera FPS."""
@@ -58,8 +77,23 @@ class SimulatedCameraReader(BaseFrameReader):
                 if self.loop:
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
-                else:
-                    break
+                if callable(self._on_eof):
+                    try:
+                        self._on_eof()
+                    except Exception as e:
+                        print(f"[SimulatedCamera] on_eof callback error: {e}")
+                break
+
+            if (
+                self._target_width
+                and self._target_height
+                and (frame.shape[1], frame.shape[0]) != (self._target_width, self._target_height)
+            ):
+                frame = cv2.resize(
+                    frame,
+                    (self._target_width, self._target_height),
+                    interpolation=cv2.INTER_AREA,
+                )
 
             self._frame_count += 1
             current_count = self._frame_count
@@ -118,7 +152,23 @@ class SimulatedCameraReader(BaseFrameReader):
         return self._total_frames
 
     def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
         self._stopped = True
         self._new_frame_event.set()
+        if (
+            hasattr(self, '_thread')
+            and self._thread is not None
+            and self._thread.is_alive()
+            and threading.current_thread() is not self._thread
+        ):
+            self._thread.join(timeout=1.5)
         if self._cap and self._cap.isOpened():
             self._cap.release()
+        if self._delete_on_release and self.file_path and os.path.exists(self.file_path):
+            try:
+                os.remove(self.file_path)
+                print(f"🗑️ [SimulatedCamera] Deleted temporary video: {os.path.basename(self.file_path)}")
+            except OSError as e:
+                print(f"[SimulatedCamera] Failed to delete temporary video '{self.file_path}': {e}")

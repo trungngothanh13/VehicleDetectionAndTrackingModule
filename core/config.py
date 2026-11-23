@@ -23,7 +23,7 @@ class Config:
     LEGACY_CONFIDENCE_THRESHOLD = float(os.getenv('LEGACY_CONFIDENCE_THRESHOLD', '0.30'))
     MODEL_NAME = os.getenv('MODEL_NAME', '')  # Resolved automatically from MODEL_PROFILE if unset
     CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.45'))
-    IMGSZ = int(os.getenv('IMGSZ', '864'))
+    IMGSZ = int(os.getenv('IMGSZ', '640'))
 
     # Canonical vehicle class aliases (used by core.model_resolver to match model.names dynamically)
     VEHICLE_CLASS_ALIASES = {
@@ -67,6 +67,7 @@ class Config:
     MAX_FRAMES = int(os.getenv('MAX_FRAMES', '0')) or None  # None = full video
     SIMULATE_CAMERA = os.getenv('SIMULATE_CAMERA', 'False').lower() in ('true', '1', 't')
     LOOP_VIDEO = os.getenv('LOOP_VIDEO', 'False').lower() in ('true', '1', 't')
+    TEMP_VIDEO_DIR = os.getenv('TEMP_VIDEO_DIR', 'temp_videos')
 
     
     # Output directory & file paths
@@ -99,6 +100,6 @@ class Config:
     # =========================================================================
     ENABLE_WEBSOCKET_STREAM = os.getenv('ENABLE_WEBSOCKET_STREAM', 'True').lower() in ('true', '1', 't')
     API_WS_URL = os.getenv('API_WS_URL', 'ws://localhost:5000/ws/inference')
-    JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', '60'))
+    JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', '52'))
     STREAM_TARGET_FPS = float(os.getenv('STREAM_TARGET_FPS', '15.0'))
-    STREAM_MAX_WIDTH = int(os.getenv('STREAM_MAX_WIDTH', '854'))
+    STREAM_MAX_WIDTH = int(os.getenv('STREAM_MAX_WIDTH', '768'))

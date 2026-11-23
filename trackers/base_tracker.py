@@ -71,6 +71,8 @@ class BatchModelRunner:
         self._batch_frames_sum = 0
         self._batch_gpu_ms_sum = 0.0
         self._model_swap_lock = threading.Lock()
+        self._recent_cameras: dict = {}
+        self._recent_cam_lock = threading.Lock()
         self._warmup_imgsz = warmup_imgsz
 
         self._queue: queue.Queue = queue.Queue()
@@ -102,11 +104,21 @@ class BatchModelRunner:
         warm_ms = (time.perf_counter() - t_warm) * 1000.0
         print(f"🔁 [YOLO-MicroBatcher] Hot-swapped active model -> {label or new_model} (warmup={warm_ms:.0f}ms)")
 
-    def predict_one(self, frame: np.ndarray, conf: float, imgsz: int):
+    def predict_one(self, frame: np.ndarray, conf: float, imgsz: int, camera_id: str = "default"):
         """Enqueues a frame for micro-batched inference and returns its Result."""
+        with self._recent_cam_lock:
+            self._recent_cameras[camera_id] = time.monotonic()
         fut: Future = Future()
         self._queue.put((frame, conf, imgsz, fut))
         return fut.result()
+
+    def _active_camera_count(self) -> int:
+        now = time.monotonic()
+        with self._recent_cam_lock:
+            stale = [cid for cid, ts in self._recent_cameras.items() if now - ts > 1.5]
+            for cid in stale:
+                del self._recent_cameras[cid]
+            return len(self._recent_cameras)
 
     def stop(self) -> None:
         self._stopped = True
@@ -129,26 +141,28 @@ class BatchModelRunner:
             first_frame, first_conf, first_imgsz, _ = first
             target_shape = first_frame.shape[:2]
 
-            deadline = time.monotonic() + self.max_wait_sec
-            while len(batch) < self.max_batch_size:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    item = self._queue.get(timeout=remaining)
-                except queue.Empty:
-                    break
+            # Zero-wait fast path when <= 1 camera is actively streaming; only coalesce when >= 2 cameras submit frames
+            if self._active_camera_count() > 1:
+                deadline = time.monotonic() + self.max_wait_sec
+                while len(batch) < self.max_batch_size:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        item = self._queue.get(timeout=remaining)
+                    except queue.Empty:
+                        break
 
-                if item is None:
-                    self._stopped = True
-                    break
+                    if item is None:
+                        self._stopped = True
+                        break
 
-                f, c, sz, _ = item
-                if f.shape[:2] == target_shape and c == first_conf and sz == first_imgsz:
-                    batch.append(item)
-                else:
-                    self._leftovers.append(item)
-                    break
+                    f, c, sz, _ = item
+                    if f.shape[:2] == target_shape and c == first_conf and sz == first_imgsz:
+                        batch.append(item)
+                    else:
+                        self._leftovers.append(item)
+                        break
 
             frames = [item[0] for item in batch]
             futures = [item[3] for item in batch]
@@ -209,6 +223,7 @@ class BaseTracker(ABC):
         self.imgsz = imgsz
         self._shared_model = shared_model
         self._model_lock = model_lock
+        self.camera_id = kwargs.get('camera_id', 'default')
         self._seen_ids = set()
         self._pending_reset = False
 
@@ -224,6 +239,7 @@ class BaseTracker(ABC):
                     frame,
                     conf=self.confidence_threshold,
                     imgsz=self.imgsz,
+                    camera_id=self.camera_id,
                 )
             ]
         if self._model_lock is not None:

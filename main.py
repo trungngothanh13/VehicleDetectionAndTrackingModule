@@ -82,6 +82,12 @@ def parse_args():
         help="Detection confidence threshold override (default: 0.45 for trained, 0.30 for legacy stock)",
     )
     parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=None,
+        help="YOLO inference input size (default: 640)",
+    )
+    parser.add_argument(
         "--max-frames",
         "-n",
         type=int,
@@ -157,6 +163,19 @@ def resolve_camera_zones_file(camera_id: str, default_zones_file: str) -> str:
     return cam_zones_path
 
 
+def purge_temp_videos_dir(temp_dir: str) -> None:
+    """Deletes any stale temporary uploaded video files on startup or shutdown."""
+    if not temp_dir or not os.path.exists(temp_dir):
+        return
+    for name in os.listdir(temp_dir):
+        full_path = os.path.join(temp_dir, name)
+        if os.path.isfile(full_path):
+            try:
+                os.remove(full_path)
+            except OSError:
+                pass
+
+
 def build_session_reader(camera_id: str, config: Config, is_primary: bool):
     """Builds the initial frame reader for a single camera session."""
     input_source = str(config.INPUT_VIDEO).strip()
@@ -212,7 +231,12 @@ def create_camera_session(
     """Instantiates an isolated per-camera pipeline sharing one GPU YOLO model."""
     reader, ingest_mode, is_ws_ingest = build_session_reader(camera_id, config, is_primary=is_primary)
 
-    tracker = create_tracker(config, shared_model=shared_model, model_lock=model_lock)
+    tracker = create_tracker(
+        config,
+        shared_model=shared_model,
+        model_lock=model_lock,
+        camera_id=camera_id,
+    )
     visualizer = Visualizer(config.DETECTION_CLASSES)
 
     cam_zones_file = resolve_camera_zones_file(camera_id, config.ZONES_FILE)
@@ -249,14 +273,17 @@ def create_camera_session(
         ws_sink = WebSocketSink(
             ws_url=config.API_WS_URL,
             camera_id=camera_id,
-            jpeg_quality=getattr(config, 'JPEG_QUALITY', 65),
+            jpeg_quality=getattr(config, 'JPEG_QUALITY', 52),
             target_fps=getattr(config, 'STREAM_TARGET_FPS', 15.0),
-            max_width=getattr(config, 'STREAM_MAX_WIDTH', 960),
+            max_width=getattr(config, 'STREAM_MAX_WIDTH', 768),
             evidence_dir=config.EVIDENCE_DIR,
             zones_file=cam_zones_file,
+            temp_video_dir=getattr(config, 'TEMP_VIDEO_DIR', 'temp_videos'),
             on_ingest_frame=reader.push_frame if isinstance(reader, WebSocketFrameReader) else None,
             ingest_mode=ingest_mode,
         )
+        if isinstance(reader, WebSocketFrameReader):
+            reader._on_drop_frame = ws_sink.send_frame_ack
         sinks.append(ws_sink)
 
     if enable_preview:
@@ -282,14 +309,55 @@ def create_camera_session(
             source_val = str(cmd.get("sourceValue", "test_1.mp4")).strip()
             loop_flag = bool(cmd.get("loop", True))
 
-            if source_type in ("web_stream", "ws", "laptop_webcam_web", "custom_video_web"):
+            if source_type == "uploaded_video":
+                local_path = str(cmd.get("localPath", "")).strip()
+                if not local_path or not os.path.exists(local_path):
+                    ws_sink.send_source_status(
+                        "error",
+                        source_type="uploaded_video",
+                        label=source_val,
+                        error=f"Downloaded video file missing: {local_path}",
+                    )
+                    return
+
+                def handle_eof() -> None:
+                    idle_reader = WebSocketFrameReader(
+                        width=854,
+                        height=480,
+                        fps=15,
+                        on_drop_frame=ws_sink.send_frame_ack,
+                    )
+                    ws_sink.on_ingest_frame = idle_reader.push_frame
+                    ws_sink.ingest_mode = "ws"
+                    ws_sink.set_overlay_only(False)
+                    pipeline.request_reader_switch(idle_reader, f"Standby (Video Ended: {source_val})")
+                    ws_sink.send_source_status("ended", source_type="uploaded_video", label=source_val)
+
+                new_sim_reader = SimulatedCameraReader(
+                    local_path,
+                    loop=loop_flag,
+                    target_width=854,
+                    target_height=480,
+                    delete_on_release=True,
+                    on_eof=handle_eof,
+                )
+                ws_sink.on_ingest_frame = None
+                ws_sink.ingest_mode = "uploaded_video"
+                ws_sink.set_overlay_only(False)
+                pipeline.request_reader_switch(new_sim_reader, f"Uploaded Video ({source_val})")
+            elif source_type in ("web_stream", "ws", "laptop_webcam_web", "custom_video_web"):
                 if isinstance(pipeline.reader, WebSocketFrameReader) and pipeline._pending_reader is None:
                     ws_sink.on_ingest_frame = pipeline.reader.push_frame
                     ws_sink.ingest_mode = "ws"
                     pipeline.reset_state()
                     print(f"🎬 [{camera_id}] Active WebSocketFrameReader reset & ready for Web-Fed Stream: {source_val}")
                 else:
-                    new_ws_reader = WebSocketFrameReader(width=854, height=480, fps=15)
+                    new_ws_reader = WebSocketFrameReader(
+                        width=854,
+                        height=480,
+                        fps=15,
+                        on_drop_frame=ws_sink.send_frame_ack,
+                    )
                     ws_sink.on_ingest_frame = new_ws_reader.push_frame
                     ws_sink.ingest_mode = "ws"
                     pipeline.request_reader_switch(new_ws_reader, f"Web-Fed Stream ({source_val})")
@@ -297,6 +365,7 @@ def create_camera_session(
                 dev = source_val if source_val else "0"
                 ws_sink.on_ingest_frame = None
                 ws_sink.ingest_mode = "webcam"
+                ws_sink.set_overlay_only(False)
                 new_cam_reader = WebcamReader(device=dev, target_width=854, target_height=480, target_fps=30)
                 pipeline.request_reader_switch(new_cam_reader, f"Host Laptop Camera ({dev})")
             elif source_type == "server_video":
@@ -304,10 +373,34 @@ def create_camera_session(
                 if os.path.exists(safe_name):
                     ws_sink.on_ingest_frame = None
                     ws_sink.ingest_mode = "simulated_camera"
+                    ws_sink.set_overlay_only(False)
                     new_sim_reader = SimulatedCameraReader(safe_name, loop=loop_flag)
                     pipeline.request_reader_switch(new_sim_reader, f"Server Video ({safe_name})")
 
+        def handle_stop_source() -> None:
+            ws_sink.set_overlay_only(False)
+            if isinstance(pipeline.reader, WebSocketFrameReader) and pipeline._pending_reader is None:
+                ws_sink.on_ingest_frame = pipeline.reader.push_frame
+                ws_sink.ingest_mode = "ws"
+                pipeline.reset_state()
+            else:
+                idle_reader = WebSocketFrameReader(
+                    width=854,
+                    height=480,
+                    fps=15,
+                    on_drop_frame=ws_sink.send_frame_ack,
+                )
+                ws_sink.on_ingest_frame = idle_reader.push_frame
+                ws_sink.ingest_mode = "ws"
+                pipeline.request_reader_switch(idle_reader, "Idle (Stopped)")
+
+        def handle_set_loop(loop_val: bool) -> None:
+            if hasattr(pipeline.reader, 'set_loop'):
+                pipeline.reader.set_loop(loop_val)
+
         ws_sink.on_switch_source = handle_remote_source_switch
+        ws_sink.on_stop_source = handle_stop_source
+        ws_sink.on_set_loop = handle_set_loop
         ws_sink.on_switch_model = on_switch_model
         ws_sink.on_switch_tracker = on_switch_tracker
 
@@ -344,6 +437,9 @@ def main():
 
     if args.conf is not None:
         config.CONFIDENCE_THRESHOLD = args.conf
+    if args.imgsz is not None:
+        config.IMGSZ = args.imgsz
+    purge_temp_videos_dir(getattr(config, 'TEMP_VIDEO_DIR', 'temp_videos'))
     if args.preview:
         config.SHOW_LIVE_PREVIEW = True
     if args.no_video:
@@ -457,6 +553,7 @@ def main():
                         config,
                         shared_model=batch_runner,
                         model_lock=model_lock,
+                        camera_id=sess.camera_id,
                     )
                     sess.request_tracker_switch(new_tracker)
 
@@ -490,6 +587,7 @@ def main():
             pipeline.run()
         finally:
             batch_runner.stop()
+            purge_temp_videos_dir(getattr(config, 'TEMP_VIDEO_DIR', 'temp_videos'))
         return
 
     # Multi-camera concurrent sessions sharing the single loaded YOLO model via BatchModelRunner
@@ -523,6 +621,7 @@ def main():
             t.join(timeout=2.0)
     finally:
         batch_runner.stop()
+        purge_temp_videos_dir(getattr(config, 'TEMP_VIDEO_DIR', 'temp_videos'))
 
 
 if __name__ == "__main__":

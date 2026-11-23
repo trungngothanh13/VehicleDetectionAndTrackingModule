@@ -100,6 +100,17 @@ class EvidenceRecorder:
             self._buffer.clear()
             self._pending.clear()
 
+    def reconfigure(self, fps: int, width: int, height: int) -> None:
+        """Updates FPS/resolution and resets buffers when the active source reader swaps."""
+        with self._lock:
+            self.fps = max(1, int(fps))
+            self.width = int(width)
+            self.height = int(height)
+            self._pre_frames = max(1, int(self.fps * self.pre_seconds))
+            self._post_frames = max(1, int(self.fps * self.post_seconds))
+            self._buffer = deque(maxlen=self._pre_frames)
+            self._pending.clear()
+
     def flush(self) -> None:
         """
         Finalize any in-progress clips (e.g., video ended before post-trigger
