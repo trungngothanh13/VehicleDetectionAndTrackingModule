@@ -13,9 +13,9 @@ class ZoneChecker:
        - Standard Stop-Line mode (`crossing_mode=False`, or no Exit Zones defined):
          Flags `Approach Lane -> Intersection/Exit Zone` when light is effectively red.
        - Split-Phase Signal (Require Exit Zone) mode (`crossing_mode=True` with Exit Zones):
-         Waits until a vehicle actually traverses to a far-side Exit Zone during effective red,
-         eliminating false flags on protected left/right turns while relaxed entry positioning
-         tracks vehicles even if IDs re-acquire mid-intersection in heavy crowds.
+         Requires the full `Approach Lane -> Intersection -> Exit Zone` trajectory during
+         effective red, eliminating false flags both on protected turns and on perpendicular
+         cross-traffic turning from `Intersection -> Exit Zone`.
     2. Green->Red Clearance Grace (`clearance_seconds`):
        - `0.0`: disabled (strict immediate red).
        - `> 0.0` (e.g. `5.0`s, adjustable 1-15s): grants a post-green grace window in EITHER
@@ -172,11 +172,9 @@ class ZoneChecker:
                 if not effective_red:
                     self._legal_crosser[vehicle_id] = True
                     return False
-                if (
-                    self.clearance_seconds > 0
-                    and self._seen_in_lane.get(vehicle_id, False)
-                    and not self._seen_in_lane_during_red.get(vehicle_id, False)
-                ):
+                if not self._seen_in_lane.get(vehicle_id, False):
+                    return False
+                if self.clearance_seconds > 0 and not self._seen_in_lane_during_red.get(vehicle_id, False):
                     self._legal_crosser[vehicle_id] = True
                     return False
                 self._entered_intersection[vehicle_id] = True
@@ -189,10 +187,12 @@ class ZoneChecker:
                 if not effective_red:
                     self._legal_crosser[vehicle_id] = True
                     return False
-                if (
+                came_from_lane = (
                     self._seen_in_lane_during_red.get(vehicle_id, False)
-                    or self._intersection_red_frames.get(vehicle_id, 0) >= 2
-                ):
+                    if self.clearance_seconds > 0
+                    else self._seen_in_lane.get(vehicle_id, False)
+                )
+                if came_from_lane and self._entered_intersection.get(vehicle_id, False):
                     self._violation_reported[vehicle_id] = True
                     return True
                 return False
