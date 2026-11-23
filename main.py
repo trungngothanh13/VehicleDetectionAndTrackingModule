@@ -273,9 +273,9 @@ def create_camera_session(
         ws_sink = WebSocketSink(
             ws_url=config.API_WS_URL,
             camera_id=camera_id,
-            jpeg_quality=getattr(config, 'JPEG_QUALITY', 52),
-            target_fps=getattr(config, 'STREAM_TARGET_FPS', 15.0),
-            max_width=getattr(config, 'STREAM_MAX_WIDTH', 768),
+            jpeg_quality=getattr(config, 'JPEG_QUALITY', 75),
+            target_fps=getattr(config, 'STREAM_TARGET_FPS', 24.0),
+            max_width=getattr(config, 'STREAM_MAX_WIDTH', 854),
             evidence_dir=config.EVIDENCE_DIR,
             zones_file=cam_zones_file,
             temp_video_dir=getattr(config, 'TEMP_VIDEO_DIR', 'temp_videos'),
@@ -329,7 +329,6 @@ def create_camera_session(
                     )
                     ws_sink.on_ingest_frame = idle_reader.push_frame
                     ws_sink.ingest_mode = "ws"
-                    ws_sink.set_overlay_only(False)
                     pipeline.request_reader_switch(idle_reader, f"Standby (Video Ended: {source_val})")
                     ws_sink.send_source_status("ended", source_type="uploaded_video", label=source_val)
 
@@ -343,7 +342,6 @@ def create_camera_session(
                 )
                 ws_sink.on_ingest_frame = None
                 ws_sink.ingest_mode = "uploaded_video"
-                ws_sink.set_overlay_only(False)
                 pipeline.request_reader_switch(new_sim_reader, f"Uploaded Video ({source_val})")
             elif source_type in ("web_stream", "ws", "laptop_webcam_web", "custom_video_web"):
                 if isinstance(pipeline.reader, WebSocketFrameReader) and pipeline._pending_reader is None:
@@ -365,7 +363,6 @@ def create_camera_session(
                 dev = source_val if source_val else "0"
                 ws_sink.on_ingest_frame = None
                 ws_sink.ingest_mode = "webcam"
-                ws_sink.set_overlay_only(False)
                 new_cam_reader = WebcamReader(device=dev, target_width=854, target_height=480, target_fps=30)
                 pipeline.request_reader_switch(new_cam_reader, f"Host Laptop Camera ({dev})")
             elif source_type == "server_video":
@@ -373,12 +370,10 @@ def create_camera_session(
                 if os.path.exists(safe_name):
                     ws_sink.on_ingest_frame = None
                     ws_sink.ingest_mode = "simulated_camera"
-                    ws_sink.set_overlay_only(False)
                     new_sim_reader = SimulatedCameraReader(safe_name, loop=loop_flag)
                     pipeline.request_reader_switch(new_sim_reader, f"Server Video ({safe_name})")
 
         def handle_stop_source() -> None:
-            ws_sink.set_overlay_only(False)
             if isinstance(pipeline.reader, WebSocketFrameReader) and pipeline._pending_reader is None:
                 ws_sink.on_ingest_frame = pipeline.reader.push_frame
                 ws_sink.ingest_mode = "ws"

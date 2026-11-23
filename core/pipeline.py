@@ -302,26 +302,7 @@ class TrafficPipeline:
                     for sink in self.sinks:
                         sink.on_violation(event, frame.copy())
 
-                # 7. Build lightweight overlay payload if any sink is running in overlay-only mode
-                overlay_payload = None
-                if any(getattr(s, '_overlay_only', False) and getattr(s, '_send_image', False) for s in self.sinks):
-                    detections_compact = []
-                    if tracked.tracker_id is not None:
-                        short_names = getattr(self.visualizer, 'short_names', {})
-                        for i in range(len(tracked)):
-                            x1, y1, x2, y2 = [int(round(v)) for v in tracked.xyxy[i]]
-                            cid = int(tracked.class_id[i])
-                            tid = int(tracked.tracker_id[i])
-                            short = short_names.get(cid, 'obj')
-                            detections_compact.append([x1, y1, x2, y2, short, tid, 1 if tid in self.violations else 0])
-                    overlay_payload = {
-                        'sourceFrameId': source_frame_id,
-                        'width': int(frame.shape[1]),
-                        'height': int(frame.shape[0]),
-                        'detections': detections_compact,
-                    }
-
-                # 8. Dispatch frame and telemetry to all sinks
+                # 7. Dispatch frame and telemetry to all sinks
                 telemetry = FrameTelemetry(
                     frame_number=frame_count,
                     timestamp=timestamp_sec,
@@ -333,10 +314,7 @@ class TrafficPipeline:
                 )
 
                 for sink in self.sinks:
-                    if getattr(sink, '_overlay_only', None) is not None:
-                        sink.on_frame(frame, telemetry, overlay_payload=overlay_payload)
-                    else:
-                        sink.on_frame(frame, telemetry)
+                    sink.on_frame(frame, telemetry)
 
                 # Check if any preview sink requested exit
                 stop_requested = any(getattr(s, 'should_stop', False) for s in self.sinks)

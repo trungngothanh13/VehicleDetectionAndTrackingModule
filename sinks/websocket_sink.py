@@ -91,14 +91,12 @@ class WebSocketSink(BaseSink):
 
         # Only encode & upload JPEG images back over SSH when a web client focuses on this camera
         self._send_image: bool = (self.camera_id == "cam-01")
-        # When streaming a browser webcam, send ~500-byte JSON overlays instead of heavy JPEGs
-        self._overlay_only: bool = False
 
         # Separate lossless queue for violations, clip alerts, and credit ACKs
         self._priority_queue: Queue = Queue()
         # Single-slot latest-frame handoff (encoded on background worker thread, not inference thread)
         self._frame_lock = threading.Lock()
-        self._latest_frame: Optional[Tuple[Optional[np.ndarray], Dict[str, Any], Optional[Dict[str, Any]]]] = None
+        self._latest_frame: Optional[Tuple[Optional[np.ndarray], Dict[str, Any]]] = None
         self._pending_acked_frames = 0
         self._last_received_seq = 0
         self._wake_event = threading.Event()
@@ -122,10 +120,7 @@ class WebSocketSink(BaseSink):
 
     @property
     def needs_annotated_frame(self) -> bool:
-        return self._send_image and not self._overlay_only
-
-    def set_overlay_only(self, enabled: bool) -> None:
-        self._overlay_only = bool(enabled)
+        return self._send_image
 
     def send_frame_ack(self, count: int = 1) -> None:
         """Immediately sends a lightweight credit ACK so upstream sliding windows never stall on dropped frames."""
@@ -185,27 +180,21 @@ class WebSocketSink(BaseSink):
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._thread.start()
 
-    def on_frame(
-        self,
-        frame: np.ndarray,
-        telemetry: FrameTelemetry,
-        overlay_payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def on_frame(self, frame: np.ndarray, telemetry: FrameTelemetry) -> None:
         if not WEBSOCKETS_AVAILABLE or self._stopped:
             return
 
-        # In local/file/RTSP/uploaded_video mode, cap output FPS; in WS ingest mode, pace 1:1 with incoming credit flow
+        # In local/file/RTSP/uploaded_video mode, only pace above target_fps so inference cadence stays smooth
         if self.ingest_mode != "ws":
-            now = time.time()
+            now = time.monotonic()
             if self._min_frame_interval > 0 and (now - self._last_frame_time) < self._min_frame_interval:
                 return
             self._last_frame_time = now
 
-        send_full_img = self._send_image and not self._overlay_only
-        frame_ref = frame if send_full_img else None
+        frame_ref = frame if self._send_image else None
         tel_dict = telemetry.to_dict()
         with self._frame_lock:
-            self._latest_frame = (frame_ref, tel_dict, overlay_payload)
+            self._latest_frame = (frame_ref, tel_dict)
             self._pending_acked_frames += 1
         self._wake_event.set()
 
@@ -317,14 +306,12 @@ class WebSocketSink(BaseSink):
                     daemon=True,
                 ).start()
             elif callable(self.on_switch_source):
-                self._overlay_only = bool(data.get("overlayOnly", False))
                 try:
                     self.on_switch_source(data)
                 except Exception as e:
                     print(f"[WebSocketSink] Error switching source: {e}")
         elif msg_type == "stop_source":
             print(f"🛑 [{self.camera_id}] Received stop_source request from web client")
-            self._overlay_only = False
             if callable(self.on_stop_source):
                 try:
                     self.on_stop_source()
@@ -434,7 +421,6 @@ class WebSocketSink(BaseSink):
                         if chunk:
                             f.write(chunk)
             os.replace(part_path, final_path)
-            self._overlay_only = False
             if callable(self.on_switch_source):
                 self.on_switch_source({**data, "localPath": final_path})
             self.send_source_status("playing", source_type="uploaded_video", label=label)
@@ -611,26 +597,10 @@ class WebSocketSink(BaseSink):
         frame_obj: Optional[np.ndarray],
         tel_dict: Dict[str, Any],
         acked_frames: int,
-        overlay_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Encodes JPEG on sender thread when needed, JSON overlay for webcam overlay-only mode, or compact telemetry."""
+        """Encodes crisp binary JPEG on the sender thread when focused; otherwise sends compact JSON telemetry."""
         ack_seq = self._last_received_seq
-        if self._overlay_only and self._send_image and overlay_payload is not None:
-            ws.send(
-                json.dumps(
-                    {
-                        "type": "frame_overlay",
-                        "cameraId": self.camera_id,
-                        "telemetry": tel_dict,
-                        "overlay": overlay_payload,
-                        "ackSeq": ack_seq,
-                        "ackedFrames": acked_frames,
-                    },
-                    separators=(",", ":"),
-                )
-            )
-            mode_label = "JSON overlay"
-        elif frame_obj is not None and self._send_image:
+        if frame_obj is not None and self._send_image:
             h, w = frame_obj.shape[:2]
             if self.max_width and w > self.max_width:
                 new_h = int(h * (self.max_width / w))
@@ -742,13 +712,7 @@ class WebSocketSink(BaseSink):
                                 self._pending_acked_frames = 0
 
                         if frame_slot is not None:
-                            self._send_latest_frame(
-                                ws,
-                                frame_slot[0],
-                                frame_slot[1],
-                                acked_frames,
-                                overlay_payload=frame_slot[2],
-                            )
+                            self._send_latest_frame(ws, frame_slot[0], frame_slot[1], acked_frames)
             except Exception as e:
                 if not self._stopped:
                     print(f"⚠️ [{self.camera_id}] WebSocket connection lost ({e}). Reconnecting in {self.reconnect_interval}s...")
