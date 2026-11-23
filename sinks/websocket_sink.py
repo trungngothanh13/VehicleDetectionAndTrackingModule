@@ -53,9 +53,10 @@ class WebSocketSink(BaseSink):
         self,
         ws_url: str = "ws://localhost:5000/ws/inference",
         camera_id: str = "cam-01",
-        jpeg_quality: int = 60,
-        target_fps: float = 15.0,
+        jpeg_quality: int = 66,
+        target_fps: float = 24.0,
         max_width: int = 854,
+        preview_interval_sec: float = 60.0,
         queue_size: int = 2,
         reconnect_interval: int = 5,
         evidence_dir: str = "output/evidence",
@@ -89,14 +90,20 @@ class WebSocketSink(BaseSink):
         self.ingest_mode = ingest_mode
         self._pipeline_info: Dict[str, Any] = {}
 
-        # Only encode & upload JPEG images back over SSH when a web client focuses on this camera
+        # Only encode & upload full live JPEG frames when a web client focuses on this camera
         self._send_image: bool = (self.camera_id == "cam-01")
+        # Periodic lightweight 427x240 minicam snapshot every 60s (and immediately on first frame / request)
+        self._preview_interval_sec: float = float(preview_interval_sec)
+        self._last_preview_sent_at: float = 0.0
+        self._preview_requested: bool = True
+        self._preview_encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 65]
 
         # Separate lossless queue for violations, clip alerts, and credit ACKs
         self._priority_queue: Queue = Queue()
         # Single-slot latest-frame handoff (encoded on background worker thread, not inference thread)
         self._frame_lock = threading.Lock()
         self._latest_frame: Optional[Tuple[Optional[np.ndarray], Dict[str, Any]]] = None
+        self._latest_preview_frame: Optional[np.ndarray] = None
         self._pending_acked_frames = 0
         self._last_received_seq = 0
         self._wake_event = threading.Event()
@@ -118,9 +125,16 @@ class WebSocketSink(BaseSink):
         if not WEBSOCKETS_AVAILABLE:
             print("[WebSocketSink] Warning: 'websockets' package not available. WebSocket stream disabled.")
 
+    def _is_preview_due(self) -> bool:
+        if self._preview_requested:
+            return True
+        if self._preview_interval_sec <= 0:
+            return False
+        return (time.monotonic() - self._last_preview_sent_at) >= self._preview_interval_sec
+
     @property
     def needs_annotated_frame(self) -> bool:
-        return self._send_image
+        return self._send_image or self._is_preview_due()
 
     def send_frame_ack(self, count: int = 1) -> None:
         """Immediately sends a lightweight credit ACK so upstream sliding windows never stall on dropped frames."""
@@ -192,9 +206,17 @@ class WebSocketSink(BaseSink):
             self._last_frame_time = now
 
         frame_ref = frame if self._send_image else None
+        preview_ref = None
+        if self._is_preview_due():
+            self._preview_requested = False
+            self._last_preview_sent_at = time.monotonic()
+            preview_ref = frame.copy()
+
         tel_dict = telemetry.to_dict()
         with self._frame_lock:
             self._latest_frame = (frame_ref, tel_dict)
+            if preview_ref is not None:
+                self._latest_preview_frame = preview_ref
             self._pending_acked_frames += 1
         self._wake_event.set()
 
@@ -293,8 +315,12 @@ class WebSocketSink(BaseSink):
             zones = data.get("zones")
             if zones is not None:
                 self._apply_remote_zones(zones, source="zone_update")
+        elif msg_type == "request_preview":
+            self._preview_requested = True
         elif msg_type == "switch_source":
             source_type = data.get("sourceType")
+            self._preview_requested = True
+            self._last_preview_sent_at = 0.0
             print(
                 f"🎬 [{self.camera_id}] Switching input source -> "
                 f"type='{source_type}', value='{data.get('sourceValue')}'"
@@ -312,6 +338,10 @@ class WebSocketSink(BaseSink):
                     print(f"[WebSocketSink] Error switching source: {e}")
         elif msg_type == "stop_source":
             print(f"🛑 [{self.camera_id}] Received stop_source request from web client")
+            self._preview_requested = True
+            self._last_preview_sent_at = 0.0
+            with self._frame_lock:
+                self._latest_preview_frame = None
             if callable(self.on_stop_source):
                 try:
                     self.on_stop_source()
@@ -701,8 +731,9 @@ class WebSocketSink(BaseSink):
                             except Empty:
                                 break
 
-                        # 2. Send latest frame/telemetry slot if updated
+                        # 2. Send latest frame/telemetry slot & periodic 427x240 minicam preview if updated
                         frame_slot = None
+                        preview_frame = None
                         acked_frames = 0
                         with self._frame_lock:
                             if self._latest_frame is not None:
@@ -710,9 +741,28 @@ class WebSocketSink(BaseSink):
                                 acked_frames = max(1, self._pending_acked_frames)
                                 self._latest_frame = None
                                 self._pending_acked_frames = 0
+                            if self._latest_preview_frame is not None:
+                                preview_frame = self._latest_preview_frame
+                                self._latest_preview_frame = None
 
                         if frame_slot is not None:
                             self._send_latest_frame(ws, frame_slot[0], frame_slot[1], acked_frames)
+
+                        if preview_frame is not None:
+                            thumb = cv2.resize(preview_frame, (427, 240), interpolation=cv2.INTER_AREA)
+                            ret, buf = cv2.imencode('.jpg', thumb, self._preview_encode_params)
+                            if ret:
+                                ws.send(
+                                    json.dumps(
+                                        {
+                                            "type": "camera_preview",
+                                            "cameraId": self.camera_id,
+                                            "image": base64.b64encode(buf).decode("utf-8"),
+                                            "timestamp": time.time(),
+                                        },
+                                        separators=(",", ":"),
+                                    )
+                                )
             except Exception as e:
                 if not self._stopped:
                     print(f"⚠️ [{self.camera_id}] WebSocket connection lost ({e}). Reconnecting in {self.reconnect_interval}s...")

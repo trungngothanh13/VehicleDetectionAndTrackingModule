@@ -273,9 +273,10 @@ def create_camera_session(
         ws_sink = WebSocketSink(
             ws_url=config.API_WS_URL,
             camera_id=camera_id,
-            jpeg_quality=getattr(config, 'JPEG_QUALITY', 75),
+            jpeg_quality=getattr(config, 'JPEG_QUALITY', 66),
             target_fps=getattr(config, 'STREAM_TARGET_FPS', 24.0),
             max_width=getattr(config, 'STREAM_MAX_WIDTH', 854),
+            preview_interval_sec=getattr(config, 'PREVIEW_INTERVAL_SEC', 60.0),
             evidence_dir=config.EVIDENCE_DIR,
             zones_file=cam_zones_file,
             temp_video_dir=getattr(config, 'TEMP_VIDEO_DIR', 'temp_videos'),
