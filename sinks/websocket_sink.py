@@ -63,6 +63,8 @@ class WebSocketSink(BaseSink):
         on_zone_update: Optional[Any] = None,
         on_ingest_frame: Optional[Any] = None,
         on_switch_source: Optional[Any] = None,
+        on_switch_model: Optional[Any] = None,
+        on_switch_tracker: Optional[Any] = None,
         ingest_mode: str = "local",
     ):
         self.ws_url = ws_url
@@ -76,6 +78,8 @@ class WebSocketSink(BaseSink):
         self.on_zone_update = on_zone_update
         self.on_ingest_frame = on_ingest_frame
         self.on_switch_source = on_switch_source
+        self.on_switch_model = on_switch_model
+        self.on_switch_tracker = on_switch_tracker
         self.ingest_mode = ingest_mode
         self._pipeline_info: Dict[str, Any] = {}
 
@@ -120,6 +124,8 @@ class WebSocketSink(BaseSink):
             "pipeline": {
                 "tracker": pipeline_info.get("tracker_type"),
                 "model": pipeline_info.get("model_name"),
+                "modelProfile": pipeline_info.get("model_profile", "trained"),
+                "confidence": pipeline_info.get("confidence"),
                 "fps": pipeline_info.get("fps"),
                 "width": pipeline_info.get("width"),
                 "height": pipeline_info.get("height"),
@@ -168,6 +174,32 @@ class WebSocketSink(BaseSink):
             "evidenceImage": b64_snapshot,
         }
         self._enqueue_priority(message)
+
+    def send_model_status(self, status_payload: Dict[str, Any]) -> None:
+        """Broadcasts active model profile status back to api.VDAT after a live hot-swap."""
+        if not WEBSOCKETS_AVAILABLE or self._stopped:
+            return
+        self._pipeline_info["model_name"] = status_payload.get("modelName", self._pipeline_info.get("model_name"))
+        self._pipeline_info["model_profile"] = status_payload.get("profile", self._pipeline_info.get("model_profile"))
+        self._pipeline_info["confidence"] = status_payload.get("confidence", self._pipeline_info.get("confidence"))
+        self._enqueue_priority({
+            "type": "model_status",
+            "cameraId": self.camera_id,
+            **status_payload,
+            "timestamp": time.time(),
+        })
+
+    def send_tracker_status(self, status_payload: Dict[str, Any]) -> None:
+        """Broadcasts active tracking engine status back to api.VDAT after a live hot-swap."""
+        if not WEBSOCKETS_AVAILABLE or self._stopped:
+            return
+        self._pipeline_info["tracker_type"] = status_payload.get("tracker", self._pipeline_info.get("tracker_type"))
+        self._enqueue_priority({
+            "type": "tracker_status",
+            "cameraId": self.camera_id,
+            **status_payload,
+            "timestamp": time.time(),
+        })
 
     def _enqueue_priority(self, message: Dict[str, Any]) -> None:
         try:
@@ -233,6 +265,24 @@ class WebSocketSink(BaseSink):
                     self.on_switch_source(data)
                 except Exception as e:
                     print(f"[WebSocketSink] Error switching source: {e}")
+        elif msg_type == "switch_model":
+            target_profile = str(data.get("profile", "trained")).strip().lower()
+            print(f"🔁 [{self.camera_id}] Received live model switch request -> profile='{target_profile}'")
+            if callable(self.on_switch_model):
+                threading.Thread(
+                    target=self.on_switch_model,
+                    args=(target_profile,),
+                    daemon=True,
+                ).start()
+        elif msg_type == "switch_tracker":
+            target_tracker = str(data.get("tracker", "bytetrack")).strip().lower()
+            print(f"🧭 [{self.camera_id}] Received live tracker switch request -> tracker='{target_tracker}'")
+            if callable(self.on_switch_tracker):
+                threading.Thread(
+                    target=self.on_switch_tracker,
+                    args=(target_tracker,),
+                    daemon=True,
+                ).start()
 
     def _process_ingest_frame(
         self,

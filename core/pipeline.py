@@ -44,7 +44,12 @@ class TrafficPipeline:
         self.violation_events: List[ViolationEvent] = []
         self._evidence_recorder: Optional[EvidenceRecorder] = None
         self._pending_reader: Optional[BaseFrameReader] = None
+        self._pending_tracker = None
         self._stopped = False
+
+    def request_tracker_switch(self, new_tracker) -> None:
+        """Thread-safely schedules a live tracker swap on the next frame."""
+        self._pending_tracker = new_tracker
 
     def stop(self) -> None:
         """Signals this pipeline session to exit gracefully."""
@@ -104,6 +109,8 @@ class TrafficPipeline:
             'input_source': getattr(self.config, 'INPUT_VIDEO', 'Stream'),
             'tracker_type': getattr(self.config, 'TRACKER_TYPE', 'unknown'),
             'model_name': getattr(self.config, 'MODEL_NAME', 'unknown'),
+            'model_profile': getattr(self.config, 'MODEL_PROFILE', 'trained'),
+            'confidence': getattr(self.config, 'CONFIDENCE_THRESHOLD', 0.45),
             'fps': fps,
             'width': width,
             'height': height,
@@ -155,6 +162,14 @@ class TrafficPipeline:
 
         try:
             while not self._stopped:
+                if self._pending_tracker is not None:
+                    self.tracker = self._pending_tracker
+                    self._pending_tracker = None
+                    if self.zone_checker is not None:
+                        self.zone_checker.reset()
+                    self.violations.clear()
+                    print(f"🧭 [{self.camera_id}] Swapped active tracker live -> {self.tracker.__class__.__name__}")
+
                 if self._pending_reader is not None:
                     old_reader = self.reader
                     self.reader = self._pending_reader

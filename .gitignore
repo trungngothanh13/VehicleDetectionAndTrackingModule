@@ -217,11 +217,13 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Model weights & exported models
+# Model weights & exported models (allow trained weights/best.pt for deployment)
 *.pt
 *.onnx
 *.engine
 yolo26l.pt
+!weights/
+!weights/best.pt
 
 # Video files
 *.mp4

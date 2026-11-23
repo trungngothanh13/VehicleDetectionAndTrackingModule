@@ -109,6 +109,10 @@ class DeepSortTracker(BaseTracker):
         Run YOLO detection, associate tracks via DeepSORT (IoU or ReID),
         and update Kalman filter state.
         """
+        if self._pending_reset:
+            self._pending_reset = False
+            self.reset()
+
         results = self._run_model_predict(frame)
         result = results[0]
 

@@ -16,12 +16,36 @@ class Config:
     # =========================================================================
     # GLOBAL MODEL & DETECTION SETTINGS
     # =========================================================================
-    MODEL_NAME = os.getenv('MODEL_NAME', 'yolo26l.pt')
-    CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.30'))
+    TRAINED_MODEL_NAME = os.getenv('TRAINED_MODEL_NAME', 'weights/best.pt')
+    LEGACY_MODEL_NAME = os.getenv('LEGACY_MODEL_NAME', 'yolo26l.pt')
+    MODEL_PROFILE = os.getenv('MODEL_PROFILE', 'trained').strip().lower()  # 'trained' | 'stock'
+    TRAINED_CONFIDENCE_THRESHOLD = float(os.getenv('TRAINED_CONFIDENCE_THRESHOLD', '0.45'))
+    LEGACY_CONFIDENCE_THRESHOLD = float(os.getenv('LEGACY_CONFIDENCE_THRESHOLD', '0.30'))
+    MODEL_NAME = os.getenv('MODEL_NAME', '')  # Resolved automatically from MODEL_PROFILE if unset
+    CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.45'))
     IMGSZ = int(os.getenv('IMGSZ', '864'))
 
-    # COCO classes to detect and track
-    # 1: bicycle, 2: car, 3: motorcycle, 5: bus, 7: truck
+    # Canonical vehicle class aliases (used by core.model_resolver to match model.names dynamically)
+    VEHICLE_CLASS_ALIASES = {
+        'bicycle': 'bicycle',
+        'bike': 'bicycle',
+        'car': 'car',
+        'auto': 'car',
+        'sedan': 'car',
+        'suv': 'car',
+        'van': 'car',
+        'motorcycle': 'motorcycle',
+        'motorbike': 'motorcycle',
+        'moto': 'motorcycle',
+        'scooter': 'motorcycle',
+        'bus': 'bus',
+        'coach': 'bus',
+        'truck': 'truck',
+        'lorry': 'truck',
+        'pickup': 'truck',
+    }
+
+    # Default COCO vehicle classes (overridden at runtime when loading custom models like 5-class best.pt)
     DETECTION_CLASSES = {
         1: 'bicycle',
         2: 'car',

@@ -4,26 +4,38 @@ from typing import Dict, Set, Optional
 
 
 class Visualizer:
+    NAME_COLORS = {
+        'bicycle': (255, 50, 255),     # Magenta / Pink
+        'car': (50, 230, 50),          # Bright Green
+        'motorcycle': (255, 215, 0),   # Bright Cyan / Sky Blue
+        'bus': (0, 140, 255),          # Bright Orange
+        'truck': (0, 235, 255),        # Bright Yellow
+    }
+    NAME_SHORT = {
+        'bicycle': 'bike',
+        'car': 'car',
+        'motorcycle': 'moto',
+        'bus': 'bus',
+        'truck': 'truck',
+    }
+
     def __init__(self, tracked_classes: Dict[int, str]):
-        self.tracked_classes = tracked_classes
-        # Vibrant, high-contrast BGR colors
-        self.colors = {
-            1: (255, 50, 255),   # bicycle - Magenta / Pink
-            2: (50, 230, 50),    # car - Bright Green
-            3: (255, 215, 0),    # motorcycle - Bright Cyan/Sky Blue
-            5: (0, 140, 255),    # bus - Bright Orange
-            7: (0, 235, 255)     # truck - Bright Yellow
-        }
-        # Abbreviated class names for compact labels
-        self.short_names = {
-            1: 'bike',
-            2: 'car',
-            3: 'moto',
-            5: 'bus',
-            7: 'truck'
-        }
+        self.tracked_classes = {}
+        self.colors: Dict[int, tuple] = {}
+        self.short_names: Dict[int, str] = {}
+        self.update_classes(tracked_classes)
         self.violations_count = 0
         self.light_state = 'unknown'
+
+    def update_classes(self, tracked_classes: Dict[int, str]) -> None:
+        """Dynamically refreshes class-ID colors and short labels (e.g. on live model toggle)."""
+        self.tracked_classes = dict(tracked_classes or {})
+        self.colors = {}
+        self.short_names = {}
+        for cid, cname in self.tracked_classes.items():
+            key = str(cname).strip().lower()
+            self.colors[int(cid)] = self.NAME_COLORS.get(key, (0, 255, 255))
+            self.short_names[int(cid)] = self.NAME_SHORT.get(key, key[:5] or 'obj')
 
     def _get_text_color(self, bg_color):
         """Compute black or white text color for maximum luminance contrast."""
@@ -38,36 +50,45 @@ class Visualizer:
 
         violation_set = violation_ids if violation_ids is not None else set()
 
-        for i in range(len(tracked_detections)):
+        # Draw normal detections first so red violation highlights always render on top
+        ordered_indices = sorted(
+            range(len(tracked_detections)),
+            key=lambda idx: int(tracked_detections.tracker_id[idx]) in violation_set,
+        )
+
+        for i in ordered_indices:
             x1, y1, x2, y2 = map(int, tracked_detections.xyxy[i])
             class_id = int(tracked_detections.class_id[i])
             tracker_id = int(tracked_detections.tracker_id[i])
 
             is_violation = tracker_id in violation_set
+            short = self.short_names.get(class_id, 'obj')
 
-            # Use bright RED for vehicles committing a violation
             if is_violation:
                 box_color = (0, 0, 255)  # Red in BGR
-                short = self.short_names.get(class_id, 'obj')
-                label = f"#{tracker_id} {short} [VIOLATION]"
+                label = f"{short} #{tracker_id}"
+                box_thickness = 2
+                font_scale = 0.40
             else:
                 box_color = self.colors.get(class_id, (0, 255, 255))
-                short = self.short_names.get(class_id, 'obj')
-                label = f"#{tracker_id} {short}"
+                label = short
+                box_thickness = 1
+                font_scale = 0.36
 
-            # Draw bounding box (2px thickness for high visibility)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+            # Draw slim bounding box (1px normal, 2px red for violations)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, box_thickness)
 
-            # Measure label text size
-            font_scale, thickness = 0.40, 1
-            (label_w, label_h), baseline = cv2.getTextSize(
+            # Measure compact label text size
+            thickness = 1
+            (label_w, label_h), _ = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
             )
 
-            # Draw solid background badge for label
-            badge_y1 = max(0, y1 - label_h - 6)
-            badge_y2 = y1
-            badge_x2 = min(frame.shape[1], x1 + label_w + 6)
+            # Draw tight solid background badge for label
+            pad_x, pad_y = 2, 2
+            badge_y1 = max(0, y1 - label_h - pad_y * 2)
+            badge_y2 = max(label_h + pad_y * 2, y1)
+            badge_x2 = min(frame.shape[1], x1 + label_w + pad_x * 2)
             cv2.rectangle(frame, (x1, badge_y1), (badge_x2, badge_y2), box_color, -1)
 
             # Draw text with optimal high-contrast color
@@ -75,7 +96,7 @@ class Visualizer:
             cv2.putText(
                 frame,
                 label,
-                (x1 + 3, badge_y2 - 3),
+                (x1 + pad_x, badge_y2 - pad_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 font_scale,
                 text_color,

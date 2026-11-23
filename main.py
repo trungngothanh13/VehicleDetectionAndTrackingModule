@@ -5,6 +5,7 @@ import argparse
 from typing import List, Optional
 from ultralytics import YOLO
 from core.config import Config
+from core.model_resolver import apply_model_classes, resolve_profile_model
 from core.pipeline import TrafficPipeline
 from ingestion import (
     VideoFileReader,
@@ -65,7 +66,20 @@ def parse_args():
         "-m",
         type=str,
         default=None,
-        help="Detector model weights file (e.g. yolo26l.pt)",
+        help="Detector model weights file override (default: fine-tuned weights/best.pt, or yolo26l.pt with --legacy)",
+    )
+    parser.add_argument(
+        "--legacy",
+        "--stock",
+        action="store_true",
+        dest="legacy",
+        help="Start in legacy stock COCO YOLO26l mode (yolo26l.pt) instead of fine-tuned VDAT weights",
+    )
+    parser.add_argument(
+        "--conf",
+        type=float,
+        default=None,
+        help="Detection confidence threshold override (default: 0.45 for trained, 0.30 for legacy stock)",
     )
     parser.add_argument(
         "--max-frames",
@@ -113,44 +127,6 @@ def parse_args():
     )
     return parser.parse_args()
 
-
-def main():
-    args = parse_args()
-    config = Config()
-
-    # Apply CLI overrides to Config
-    if args.input:
-        config.INPUT_VIDEO = args.input
-    if args.webcam is not None:
-        config.INPUT_VIDEO = f"webcam:{args.webcam}"
-    if args.web_input:
-        config.INPUT_VIDEO = "ws"
-        config.ENABLE_WEBSOCKET_STREAM = True
-    if args.tracker:
-        config.TRACKER_TYPE = args.tracker
-    if args.model:
-        config.MODEL_NAME = args.model
-    if args.preview:
-        config.SHOW_LIVE_PREVIEW = True
-    if args.no_video:
-        config.SAVE_OUTPUT_VIDEO = True if False else False
-    if args.ws:
-        config.ENABLE_WEBSOCKET_STREAM = True
-    if args.ws_url:
-        config.API_WS_URL = args.ws_url
-    if args.simulate_camera:
-        config.SIMULATE_CAMERA = True
-    if args.loop:
-        config.LOOP_VIDEO = True
-    if args.draw_zones:
-        config.ENABLE_ZONE_DRAWER = True
-    if args.max_frames is not None:
-        config.MAX_FRAMES = args.max_frames
-
-    # If zone drawer requested, run GUI tool and exit
-    if config.ENABLE_ZONE_DRAWER:
-        ZoneDrawer().draw_zones(config.INPUT_VIDEO)
-        return
 
 def resolve_camera_ids(args, config: Config) -> List[str]:
     """Parses --cameras (space or comma separated), defaulting to 6 web slots (cam-01..cam-06) in --web-input mode."""
@@ -230,6 +206,8 @@ def create_camera_session(
     model_lock: threading.Lock,
     is_primary: bool,
     enable_preview: bool,
+    on_switch_model=None,
+    on_switch_tracker=None,
 ) -> TrafficPipeline:
     """Instantiates an isolated per-camera pipeline sharing one GPU YOLO model."""
     reader, ingest_mode, is_ws_ingest = build_session_reader(camera_id, config, is_primary=is_primary)
@@ -330,6 +308,8 @@ def create_camera_session(
                     pipeline.request_reader_switch(new_sim_reader, f"Server Video ({safe_name})")
 
         ws_sink.on_switch_source = handle_remote_source_switch
+        ws_sink.on_switch_model = on_switch_model
+        ws_sink.on_switch_tracker = on_switch_tracker
 
     return pipeline
 
@@ -348,8 +328,22 @@ def main():
         config.ENABLE_WEBSOCKET_STREAM = True
     if args.tracker:
         config.TRACKER_TYPE = args.tracker
+    if args.legacy:
+        config.MODEL_PROFILE = "stock"
     if args.model:
         config.MODEL_NAME = args.model
+        # Infer profile label when user explicitly passes --model
+        if "yolo26l.pt" in os.path.basename(args.model).lower() and not args.legacy:
+            config.MODEL_PROFILE = "stock"
+    else:
+        resolved_profile, resolved_weights, profile_conf = resolve_profile_model(config, config.MODEL_PROFILE)
+        config.MODEL_PROFILE = resolved_profile
+        config.MODEL_NAME = resolved_weights
+        if args.conf is None and not os.getenv("CONFIDENCE_THRESHOLD"):
+            config.CONFIDENCE_THRESHOLD = profile_conf
+
+    if args.conf is not None:
+        config.CONFIDENCE_THRESHOLD = args.conf
     if args.preview:
         config.SHOW_LIVE_PREVIEW = True
     if args.no_video:
@@ -376,8 +370,14 @@ def main():
     if len(camera_ids) > 1:
         config.ENABLE_WEBSOCKET_STREAM = True
 
-    print(f"🧠 [AI Core] Loading shared YOLO model '{config.MODEL_NAME}' (imgsz={config.IMGSZ}) with Micro-Batcher for cameras: {camera_ids}")
+    print(
+        f"🧠 [AI Core] Loading shared YOLO model '{config.MODEL_NAME}' "
+        f"(profile={config.MODEL_PROFILE}, imgsz={config.IMGSZ}, conf={config.CONFIDENCE_THRESHOLD}) "
+        f"with Micro-Batcher for cameras: {camera_ids}"
+    )
     raw_model = YOLO(config.MODEL_NAME)
+    resolved_classes = apply_model_classes(config, getattr(raw_model, "names", None))
+    print(f"🏷️  [AI Core] Active vehicle classes resolved from model: {resolved_classes}")
     batch_runner = BatchModelRunner(
         raw_model,
         max_batch_size=max(8, len(camera_ids)),
@@ -385,6 +385,94 @@ def main():
         warmup_imgsz=config.IMGSZ,
     )
     model_lock = threading.Lock()
+    model_cache = {config.MODEL_PROFILE: (raw_model, config.MODEL_NAME)}
+    switch_lock = threading.Lock()
+    sessions: List[TrafficPipeline] = []
+
+    def handle_live_model_switch(requested_profile: str) -> None:
+        """
+        Zero-downtime live toggle between Fine-Tuned VDAT (5-class best.pt) and
+        Legacy Stock COCO YOLO26l (yolo26l.pt) across all active camera sessions.
+        """
+        with switch_lock:
+            target_profile, target_weights, target_conf = resolve_profile_model(config, requested_profile)
+            if args.conf is not None:
+                target_conf = args.conf
+
+            try:
+                if target_profile in model_cache:
+                    next_model, loaded_weights = model_cache[target_profile]
+                else:
+                    print(f"📦 [AI Core] Loading '{target_profile}' model weights: {target_weights} ...")
+                    next_model = YOLO(target_weights)
+                    loaded_weights = target_weights
+                    model_cache[target_profile] = (next_model, loaded_weights)
+
+                next_classes = apply_model_classes(config, getattr(next_model, "names", None))
+                config.MODEL_PROFILE = target_profile
+                config.MODEL_NAME = loaded_weights
+                config.CONFIDENCE_THRESHOLD = target_conf
+
+                batch_runner.swap_model(next_model, label=f"{target_profile} ({os.path.basename(loaded_weights)})")
+
+                for sess in sessions:
+                    sess.tracker.target_classes = dict(next_classes)
+                    sess.tracker.confidence_threshold = target_conf
+                    sess.tracker.model = next_model
+                    sess.tracker.request_reset()
+                    sess.visualizer.update_classes(next_classes)
+
+                status_payload = {
+                    "profile": target_profile,
+                    "modelName": os.path.basename(loaded_weights),
+                    "confidence": target_conf,
+                    "classes": {str(k): v for k, v in next_classes.items()},
+                    "switching": False,
+                }
+                for sess in sessions:
+                    for sink in sess.sinks:
+                        if isinstance(sink, WebSocketSink):
+                            sink.send_model_status(status_payload)
+                            break
+                    break
+
+                print(
+                    f"✅ [AI Core] Switched ALL {len(sessions)} camera(s) to '{target_profile}' "
+                    f"({os.path.basename(loaded_weights)}, conf={target_conf}, classes={next_classes})"
+                )
+            except Exception as exc:
+                print(f"❌ [AI Core] Failed to switch model to '{requested_profile}': {exc}")
+
+    def handle_live_tracker_switch(requested_tracker: str) -> None:
+        """Hot-swaps the tracking algorithm (bytetrack / botsort / deepsort) across all active sessions."""
+        with switch_lock:
+            normalized = str(requested_tracker or "bytetrack").strip().lower()
+            if normalized not in ("bytetrack", "botsort", "deepsort"):
+                print(f"⚠️  [AI Core] Ignoring unsupported tracker '{requested_tracker}'")
+                return
+            try:
+                config.TRACKER_TYPE = normalized
+                for sess in sessions:
+                    new_tracker = create_tracker(
+                        config,
+                        shared_model=batch_runner,
+                        model_lock=model_lock,
+                    )
+                    sess.request_tracker_switch(new_tracker)
+
+                status_payload = {
+                    "tracker": normalized,
+                    "switching": False,
+                }
+                for sess in sessions:
+                    for sink in sess.sinks:
+                        if isinstance(sink, WebSocketSink):
+                            sink.send_tracker_status(status_payload)
+                            break
+                    break
+                print(f"✅ [AI Core] Switched ALL {len(sessions)} camera(s) tracker -> '{normalized}'")
+            except Exception as exc:
+                print(f"❌ [AI Core] Failed to switch tracker to '{requested_tracker}': {exc}")
 
     if len(camera_ids) == 1:
         try:
@@ -395,14 +483,16 @@ def main():
                 model_lock=model_lock,
                 is_primary=True,
                 enable_preview=config.SHOW_LIVE_PREVIEW,
+                on_switch_model=handle_live_model_switch,
+                on_switch_tracker=handle_live_tracker_switch,
             )
+            sessions.append(pipeline)
             pipeline.run()
         finally:
             batch_runner.stop()
         return
 
     # Multi-camera concurrent sessions sharing the single loaded YOLO model via BatchModelRunner
-    sessions: List[TrafficPipeline] = []
     threads: List[threading.Thread] = []
     for idx, cam_id in enumerate(camera_ids):
         session = create_camera_session(
@@ -412,6 +502,8 @@ def main():
             model_lock=model_lock,
             is_primary=(idx == 0),
             enable_preview=False,
+            on_switch_model=handle_live_model_switch,
+            on_switch_tracker=handle_live_tracker_switch,
         )
         sessions.append(session)
         t = threading.Thread(target=session.run, name=f"CameraSession-{cam_id}", daemon=True)

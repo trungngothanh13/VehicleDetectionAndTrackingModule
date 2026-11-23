@@ -70,6 +70,8 @@ class BatchModelRunner:
         self._batch_count = 0
         self._batch_frames_sum = 0
         self._batch_gpu_ms_sum = 0.0
+        self._model_swap_lock = threading.Lock()
+        self._warmup_imgsz = warmup_imgsz
 
         self._queue: queue.Queue = queue.Queue()
         self._leftovers: deque = deque()
@@ -80,6 +82,25 @@ class BatchModelRunner:
             daemon=True,
         )
         self._worker.start()
+
+    def swap_model(self, new_model, label: str = "") -> None:
+        """Atomically hot-swaps the active YOLO model used by the micro-batcher without dropping streams."""
+        t_warm = time.perf_counter()
+        with self._model_swap_lock:
+            self.model = new_model
+            try:
+                dummy_frame = np.zeros((480, 854, 3), dtype=np.uint8)
+                self.model.predict(
+                    [dummy_frame],
+                    conf=0.3,
+                    imgsz=self._warmup_imgsz,
+                    verbose=False,
+                    **self._predict_precision_kwargs,
+                )
+            except Exception as exc:
+                print(f"[YOLO-MicroBatcher] Swap warmup warning: {exc}")
+        warm_ms = (time.perf_counter() - t_warm) * 1000.0
+        print(f"🔁 [YOLO-MicroBatcher] Hot-swapped active model -> {label or new_model} (warmup={warm_ms:.0f}ms)")
 
     def predict_one(self, frame: np.ndarray, conf: float, imgsz: int):
         """Enqueues a frame for micro-batched inference and returns its Result."""
@@ -133,13 +154,14 @@ class BatchModelRunner:
             futures = [item[3] for item in batch]
             t0 = time.perf_counter()
             try:
-                results = self.model.predict(
-                    frames,
-                    conf=first_conf,
-                    imgsz=first_imgsz,
-                    verbose=False,
-                    **self._predict_precision_kwargs,
-                )
+                with self._model_swap_lock:
+                    results = self.model.predict(
+                        frames,
+                        conf=first_conf,
+                        imgsz=first_imgsz,
+                        verbose=False,
+                        **self._predict_precision_kwargs,
+                    )
                 gpu_ms = (time.perf_counter() - t0) * 1000.0
                 self._batch_count += 1
                 self._batch_frames_sum += len(frames)
@@ -188,6 +210,11 @@ class BaseTracker(ABC):
         self._shared_model = shared_model
         self._model_lock = model_lock
         self._seen_ids = set()
+        self._pending_reset = False
+
+    def request_reset(self) -> None:
+        """Thread-safely schedules a tracker reset on the next frame (used during live model swaps)."""
+        self._pending_reset = True
 
     def _run_model_predict(self, frame: np.ndarray):
         """Executes YOLO detection via BatchModelRunner or thread-locked YOLO model."""
@@ -280,6 +307,10 @@ class UltralyticsMotTracker(BaseTracker):
 
     def track(self, frame: np.ndarray) -> sv.Detections:
         """Runs shared/batched YOLO detection then updates this camera session's isolated tracker."""
+        if self._pending_reset:
+            self._pending_reset = False
+            self.reset()
+
         results = self._run_model_predict(frame)
         result = results[0]
 
