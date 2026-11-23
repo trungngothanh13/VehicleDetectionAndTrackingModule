@@ -4,7 +4,6 @@ import math
 from collections import deque
 import numpy as np
 from typing import List, Dict, Optional, Union, Tuple, Deque
-from core.events import ViolationEvent
 
 
 class ZoneChecker:
@@ -119,22 +118,6 @@ class ZoneChecker:
             return 'approach_lane'
         return None
 
-    def get_vehicle_position(self, vehicle_bbox: Union[List[float], np.ndarray]) -> Optional[Union[int, str]]:
-        """Backward-compatible wrapper returning zone label or lane index."""
-        x_center = (float(vehicle_bbox[0]) + float(vehicle_bbox[2])) / 2.0
-        y_bottom = float(vehicle_bbox[3])
-        point = (x_center, y_bottom)
-
-        if self._point_in_polygons(point, self.exit_zones):
-            return 'exit_zone'
-        if self._point_in_polygons(point, self.intersection):
-            return 'intersection'
-        for i, lane in enumerate(self.lanes):
-            if len(lane) >= 3:
-                if cv2.pointPolygonTest(np.array(lane, dtype=np.int32), point, False) >= 0:
-                    return i
-        return None
-
     def check_lane_to_intersection(
         self,
         vehicle_id: int,
@@ -218,57 +201,6 @@ class ZoneChecker:
                 return True
 
         return False
-
-    def evaluate_detections(
-        self,
-        camera_id: str,
-        frame_number: int,
-        timestamp_str: str,
-        tracked_detections,
-        tracker,
-        light_state: str,
-        allowed_class_ids: set,
-        fps: float = 15.0,
-    ) -> List[ViolationEvent]:
-        """Evaluates all tracked vehicles in the current frame and returns newly triggered ViolationEvents."""
-        if tracked_detections.tracker_id is None or len(tracked_detections) == 0:
-            return []
-
-        self.update_light_state(light_state, frame_number, fps)
-        light_is_red = (light_state == 'red')
-        violations: List[ViolationEvent] = []
-
-        for i in range(len(tracked_detections)):
-            class_id = int(tracked_detections.class_id[i])
-            if allowed_class_ids and class_id not in allowed_class_ids:
-                continue
-
-            tracker_id = int(tracked_detections.tracker_id[i])
-            bbox = [float(c) for c in tracked_detections.xyxy[i]]
-            conf = float(tracked_detections.confidence[i]) if tracked_detections.confidence is not None else None
-
-            if self.check_lane_to_intersection(
-                tracker_id,
-                bbox,
-                light_is_red=light_is_red,
-                frame_number=frame_number,
-                fps=fps,
-            ):
-                class_name = tracker.get_class_name(class_id)
-                event = ViolationEvent(
-                    camera_id=camera_id,
-                    track_id=tracker_id,
-                    vehicle_class=class_name,
-                    class_id=class_id,
-                    frame_number=frame_number,
-                    timestamp=timestamp_str,
-                    light_state=light_state,
-                    bbox=bbox,
-                    confidence=conf,
-                )
-                violations.append(event)
-
-        return violations
 
     def reset(self) -> None:
         """Reset all internal tracking states and clearance timers."""

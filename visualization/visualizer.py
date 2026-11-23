@@ -24,8 +24,6 @@ class Visualizer:
         self.colors: Dict[int, tuple] = {}
         self.short_names: Dict[int, str] = {}
         self.update_classes(tracked_classes)
-        self.violations_count = 0
-        self.light_state = 'unknown'
 
     def update_classes(self, tracked_classes: Dict[int, str]) -> None:
         """Dynamically refreshes class-ID colors and short labels (e.g. on live model toggle)."""
@@ -105,39 +103,6 @@ class Visualizer:
             )
 
         return frame
-
-    def draw_statistics(self, frame: np.ndarray, current_count: int, total_tracked: int, frame_count: int) -> np.ndarray:
-        """Draw compact statistics panel on top-left of frame"""
-        fs = 0.40   # font scale
-        pad = 8
-        line_h = 18
-        lines = [
-            (f"Vehicles:   {current_count}",  (0, 255, 255)),
-            (f"Tracked:    {total_tracked}",  (0, 255, 255)),
-            (f"Frame:      {frame_count}",    (200, 200, 200)),
-        ]
-        if hasattr(self, 'violations_count'):
-            lines.append((f"Violations: {self.violations_count}", (0, 0, 255)))
-        if hasattr(self, 'light_state'):
-            lc = (0, 0, 255) if self.light_state == 'red' else (0, 255, 0) if self.light_state == 'green' else (128, 128, 128)
-            lines.append((f"Light:      {self.light_state.upper()}", lc))
-
-        panel_w = 190
-        panel_h = pad * 2 + line_h * len(lines)
-        cv2.rectangle(frame, (8, 8), (8 + panel_w, 8 + panel_h), (0, 0, 0), -1)
-        cv2.rectangle(frame, (8, 8), (8 + panel_w, 8 + panel_h), (100, 100, 100), 1)
-
-        for idx, (text, color) in enumerate(lines):
-            y = 8 + pad + line_h * idx + 12
-            cv2.putText(frame, text, (14, y), cv2.FONT_HERSHEY_SIMPLEX, fs, color, 1, cv2.LINE_AA)
-
-        return frame
-
-    def set_violations_count(self, count: int) -> None:
-        self.violations_count = count
-
-    def set_light_state(self, state: str) -> None:
-        self.light_state = state
 
     def draw_zones(
         self,

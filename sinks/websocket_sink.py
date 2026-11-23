@@ -1,12 +1,11 @@
-import cv2
 import os
 import json
 import base64
-import struct
 import time
 import threading
 from queue import Queue, Empty
 from typing import Dict, Any, Optional, Tuple
+import cv2
 import numpy as np
 import requests
 
@@ -17,27 +16,8 @@ except ImportError:
     WEBSOCKETS_AVAILABLE = False
 
 from sinks.base_sink import BaseSink
+from sinks.binary_frame import pack_binary_frame, unpack_binary_frame
 from core.events import FrameTelemetry, ViolationEvent
-
-
-def _pack_binary_frame(header: Dict[str, Any], payload: bytes) -> bytes:
-    """Packs [4-byte uint32 BE headerLen][UTF-8 JSON header][raw JPEG bytes]."""
-    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
-    return struct.pack(">I", len(header_bytes)) + header_bytes + payload
-
-
-def _unpack_binary_frame(raw: bytes) -> Optional[Tuple[Dict[str, Any], bytes]]:
-    """Unpacks [4-byte uint32 BE headerLen][UTF-8 JSON header][raw JPEG bytes]."""
-    if len(raw) < 4:
-        return None
-    header_len = struct.unpack(">I", raw[:4])[0]
-    if header_len <= 0 or 4 + header_len > len(raw):
-        return None
-    try:
-        header = json.loads(raw[4:4 + header_len].decode("utf-8"))
-        return header, raw[4 + header_len:]
-    except Exception:
-        return None
 
 
 class WebSocketSink(BaseSink):
@@ -272,7 +252,7 @@ class WebSocketSink(BaseSink):
 
     def _parse_inbound(self, raw_msg: Any) -> Optional[Tuple[Dict[str, Any], Optional[bytes]]]:
         if isinstance(raw_msg, (bytes, bytearray, memoryview)):
-            return _unpack_binary_frame(bytes(raw_msg))
+            return unpack_binary_frame(bytes(raw_msg))
         if isinstance(raw_msg, str) and raw_msg:
             try:
                 return json.loads(raw_msg), None
@@ -660,7 +640,7 @@ class WebSocketSink(BaseSink):
 
             ret, buffer = cv2.imencode('.jpg', preview, self._encode_params)
             if ret:
-                packet = _pack_binary_frame(
+                packet = pack_binary_frame(
                     {
                         "type": "frame",
                         "cameraId": self.camera_id,

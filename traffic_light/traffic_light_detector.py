@@ -2,7 +2,7 @@ import cv2
 import json
 import numpy as np
 from collections import Counter
-from typing import List, Dict, Tuple, Optional, Union, Any
+from typing import List, Dict, Tuple, Optional, Any
 
 
 class TrafficLightDetector:
@@ -109,9 +109,3 @@ class TrafficLightDetector:
         kernel = np.ones((kernel_size, kernel_size), dtype=np.float32)
         response = cv2.filter2D(match_mask, -1, kernel, borderType=cv2.BORDER_CONSTANT)
         return float(np.max(response))
-
-    def is_red(self) -> bool:
-        return self.state == 'red'
-
-    def is_green(self) -> bool:
-        return self.state == 'green'
