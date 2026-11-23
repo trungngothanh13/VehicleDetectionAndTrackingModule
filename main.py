@@ -397,6 +397,7 @@ def create_camera_session(
         ws_sink.on_switch_source = handle_remote_source_switch
         ws_sink.on_stop_source = handle_stop_source
         ws_sink.on_set_loop = handle_set_loop
+        ws_sink.on_set_bypass_zones = pipeline.set_bypass_zones
         ws_sink.on_switch_model = on_switch_model
         ws_sink.on_switch_tracker = on_switch_tracker
 

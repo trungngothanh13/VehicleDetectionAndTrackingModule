@@ -67,6 +67,7 @@ class WebSocketSink(BaseSink):
         on_switch_source: Optional[Any] = None,
         on_stop_source: Optional[Any] = None,
         on_set_loop: Optional[Any] = None,
+        on_set_bypass_zones: Optional[Any] = None,
         on_switch_model: Optional[Any] = None,
         on_switch_tracker: Optional[Any] = None,
         ingest_mode: str = "local",
@@ -85,6 +86,7 @@ class WebSocketSink(BaseSink):
         self.on_switch_source = on_switch_source
         self.on_stop_source = on_stop_source
         self.on_set_loop = on_set_loop
+        self.on_set_bypass_zones = on_set_bypass_zones
         self.on_switch_model = on_switch_model
         self.on_switch_tracker = on_switch_tracker
         self.ingest_mode = ingest_mode
@@ -355,6 +357,19 @@ class WebSocketSink(BaseSink):
                     self.on_set_loop(loop_val)
                 except Exception as e:
                     print(f"[WebSocketSink] Error updating loop flag: {e}")
+        elif msg_type == "set_bypass_zones":
+            bypass_val = bool(data.get("bypass", False))
+            if callable(self.on_set_bypass_zones):
+                try:
+                    self.on_set_bypass_zones(bypass_val)
+                except Exception as e:
+                    print(f"[WebSocketSink] Error updating bypass_zones flag: {e}")
+            self._enqueue_priority({
+                "type": "camera_bypass_zones_status",
+                "cameraId": self.camera_id,
+                "bypass": bypass_val,
+                "timestamp": time.time(),
+            })
         elif msg_type == "switch_model":
             target_profile = str(data.get("profile", "trained")).strip().lower()
             print(f"🔁 [{self.camera_id}] Received live model switch request -> profile='{target_profile}'")
@@ -699,7 +714,7 @@ class WebSocketSink(BaseSink):
             try:
                 with ws_sync.connect(
                     self.ws_url,
-                    ping_interval=None,
+                    ping_interval=25,
                     ping_timeout=None,
                     close_timeout=2,
                     max_size=16 * 1024 * 1024,

@@ -45,7 +45,16 @@ class TrafficPipeline:
         self._evidence_recorder: Optional[EvidenceRecorder] = None
         self._pending_reader: Optional[BaseFrameReader] = None
         self._pending_tracker = None
+        self._bypass_zones: bool = False
         self._stopped = False
+
+    def set_bypass_zones(self, bypassed: bool) -> None:
+        """Temporarily disables zone drawing and violation checks without altering saved zone files."""
+        next_val = bool(bypassed)
+        if self._bypass_zones != next_val:
+            self._bypass_zones = next_val
+            state_str = "BYPASSED (detection/tracking only)" if next_val else "ACTIVE"
+            print(f"🚧 [{self.camera_id}] Zone annotations -> {state_str}")
 
     def request_tracker_switch(self, new_tracker) -> None:
         """Thread-safely schedules a live tracker swap on the next frame."""
@@ -222,16 +231,16 @@ class TrafficPipeline:
                 # 1. Detection + Tracking
                 tracked = self.tracker.track(frame)
 
-                # 2. Traffic Light State
+                # 2. Traffic Light State (skipped when zone annotations are temporarily bypassed)
                 light_state = 'unknown'
-                if self.light_detector:
+                if not self._bypass_zones and self.light_detector:
                     light_state = self.light_detector.detect(frame)
 
-                # 3. Zone Violation Evaluation
+                # 3. Zone Violation Evaluation (skipped when zone annotations are temporarily bypassed)
                 new_violations: List[ViolationEvent] = []
-                if self.zone_checker:
+                if not self._bypass_zones and self.zone_checker:
                     self.zone_checker.update_light_state(light_state, frame_count, fps)
-                if self.zone_checker and tracked.tracker_id is not None:
+                if not self._bypass_zones and self.zone_checker and tracked.tracker_id is not None:
                     light_is_red = (light_state == 'red')
                     for i in range(len(tracked)):
                         class_id = int(tracked.class_id[i])
@@ -275,7 +284,7 @@ class TrafficPipeline:
                     getattr(s, 'needs_annotated_frame', True) for s in self.sinks
                 )
                 if should_annotate:
-                    if self.zone_checker:
+                    if not self._bypass_zones and self.zone_checker:
                         lights = self.light_detector.traffic_lights if self.light_detector else None
                         frame = self.visualizer.draw_zones(
                             frame,
@@ -285,7 +294,13 @@ class TrafficPipeline:
                             exit_zones=self.zone_checker.exit_zones,
                         )
 
-                    frame = self.visualizer.draw_detections(frame, tracked, self.tracker, violation_ids=self.violations)
+                    active_violation_ids = None if self._bypass_zones else self.violations
+                    frame = self.visualizer.draw_detections(
+                        frame,
+                        tracked,
+                        self.tracker,
+                        violation_ids=active_violation_ids,
+                    )
 
                 current_count = len(tracked) if tracked.tracker_id is not None else 0
                 total_tracked = self.tracker.get_total_tracked()
