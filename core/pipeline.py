@@ -284,6 +284,7 @@ class TrafficPipeline:
                     getattr(s, 'needs_annotated_frame', True) for s in self.sinks
                 )
                 if should_annotate:
+                    frame = frame.copy()
                     if not self._bypass_zones and self.zone_checker:
                         lights = self.light_detector.traffic_lights if self.light_detector else None
                         frame = self.visualizer.draw_zones(
@@ -325,7 +326,7 @@ class TrafficPipeline:
                     vehicle_count=current_count,
                     total_tracked=total_tracked,
                     light_state=light_state,
-                    violations_count=len(self.violations),
+                    violations_count=0 if self._bypass_zones else len(self.violations),
                 )
 
                 for sink in self.sinks:

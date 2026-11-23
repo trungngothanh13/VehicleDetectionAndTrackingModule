@@ -359,6 +359,8 @@ class WebSocketSink(BaseSink):
                     print(f"[WebSocketSink] Error updating loop flag: {e}")
         elif msg_type == "set_bypass_zones":
             bypass_val = bool(data.get("bypass", False))
+            print(f"🚧 [{self.camera_id}] Received set_bypass_zones -> {bypass_val}")
+            self._preview_requested = True
             if callable(self.on_set_bypass_zones):
                 try:
                     self.on_set_bypass_zones(bypass_val)
@@ -542,8 +544,11 @@ class WebSocketSink(BaseSink):
                     self._process_ingest_frame(frame_meta, frame_jpeg)
             except TimeoutError:
                 continue
-            except Exception:
-                # Connection dropped or closed; exit reader thread
+            except Exception as exc:
+                # Connection dropped or closed; log and wake sender so worker reconnects immediately
+                if not self._stopped:
+                    print(f"⚠️ [{self.camera_id}] WebSocket reader exited ({type(exc).__name__}: {exc})")
+                self._wake_event.set()
                 break
 
     def _delete_local_clip(self, filename: str) -> None:
@@ -734,7 +739,7 @@ class WebSocketSink(BaseSink):
                     )
                     reader_thread.start()
 
-                    while not self._stopped:
+                    while not self._stopped and reader_thread.is_alive():
                         self._wake_event.wait(timeout=0.5)
                         self._wake_event.clear()
 
