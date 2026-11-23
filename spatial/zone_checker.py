@@ -1,26 +1,26 @@
 import cv2
 import json
-import math
-from collections import deque
 import numpy as np
-from typing import List, Dict, Optional, Union, Tuple, Deque
+from typing import List, Dict, Optional, Union, Tuple
 
 
 class ZoneChecker:
     """
     Manages Approach Lanes, Intersection boundaries, and Exit Zones.
 
-    Supports two evaluation modes:
-    1. Standard mode (`crossing_mode=False`):
-       Flags `Approach Lane -> Intersection/Exit Zone` when `light_state == 'red'`.
-    2. 3/4-Way Multi-Lane Crossing mode (`crossing_mode=True`):
-       - Applies a `clearance_seconds` (default 3.0s) grace timer on `green -> red` transitions.
-       - Requires vehicles to still be in an Approach Lane after the clearance timer expires
-         (`seen_in_lane_during_red`) so queued left-turners or green-phase crossers are never
-         falsely flagged.
-       - If Exit Zones are configured (Straight Red + Turn Green): only flags vehicles that
-         traverse to the far-side Exit Zone OR stand idle inside the Intersection box (>= 22 frames
-         with < 14 px displacement) when cross-traffic blocks them.
+    Supports two independent enforcement dimensions:
+    1. Violation Trigger Mode (`crossing_mode`):
+       - Standard Stop-Line mode (`crossing_mode=False`, or no Exit Zones defined):
+         Flags `Approach Lane -> Intersection/Exit Zone` when light is effectively red.
+       - Split-Phase Signal (Require Exit Zone) mode (`crossing_mode=True` with Exit Zones):
+         Waits until a vehicle actually traverses to a far-side Exit Zone during effective red,
+         eliminating false flags on protected left/right turns while relaxed entry positioning
+         tracks vehicles even if IDs re-acquire mid-intersection in heavy crowds.
+    2. Green->Red Clearance Grace (`clearance_seconds`):
+       - `0.0`: disabled (strict immediate red).
+       - `> 0.0` (e.g. `5.0`s, adjustable 1-15s): grants a post-green grace window in EITHER
+         mode so vehicles already committed into the intersection in slow traffic can finish
+         clearing safely without being flagged.
     """
 
     def __init__(self, zones_file_or_data: Union[str, Dict]):
@@ -38,7 +38,7 @@ class ZoneChecker:
         raw_clearance = zones.get('clearance_seconds')
         if raw_clearance is None:
             raw_clearance = zones.get('clearanceSeconds')
-        self.clearance_seconds = float(raw_clearance if raw_clearance is not None else 3.0)
+        self.clearance_seconds = max(0.0, float(raw_clearance if raw_clearance is not None else 0.0))
 
         # Signal phase & green->red clearance timer state
         self._confirmed_light_state: Optional[str] = None
@@ -48,12 +48,9 @@ class ZoneChecker:
         # Track state history per vehicle ID
         self._seen_in_lane: Dict[int, bool] = {}
         self._seen_in_lane_during_red: Dict[int, bool] = {}
-        self._last_lane_frame: Dict[int, int] = {}
         self._entered_intersection: Dict[int, bool] = {}
+        self._intersection_red_frames: Dict[int, int] = {}
         self._legal_crosser: Dict[int, bool] = {}
-        self._intersection_frames: Dict[int, int] = {}
-        self._recent_intersection_pts: Dict[int, Deque[Tuple[float, float]]] = {}
-        self._entry_light_state: Dict[int, str] = {}
         self._violation_reported: Dict[int, bool] = {}
 
     def update_light_state(self, light_state: str, frame_number: int, fps: float = 15.0) -> None:
@@ -80,7 +77,7 @@ class ZoneChecker:
 
     def is_in_clearance(self, frame_number: int) -> bool:
         """Returns True if frame falls inside the active green->red clearance window."""
-        return frame_number < self._red_clearance_until_frame
+        return bool(self.clearance_seconds > 0 and frame_number < self._red_clearance_until_frame)
 
     @staticmethod
     def _point_in_polygons(point: Tuple[float, float], polys) -> bool:
@@ -101,20 +98,45 @@ class ZoneChecker:
                     return True
         return False
 
+    @staticmethod
+    def _get_footprint_points(
+        vehicle_bbox: Union[List[float], np.ndarray]
+    ) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+        """Returns (core_pts, lane_pts) for relaxed lower-footprint zone matching."""
+        x1, y1, x2, y2 = (
+            float(vehicle_bbox[0]),
+            float(vehicle_bbox[1]),
+            float(vehicle_bbox[2]),
+            float(vehicle_bbox[3]),
+        )
+        w = max(0.0, x2 - x1)
+        h = max(0.0, y2 - y1)
+        xc = (x1 + x2) / 2.0
+
+        core_pts = [
+            (xc, y2),
+            (xc, y2 - 0.10 * h),
+        ]
+        lane_pts = [
+            (xc, y2),
+            (xc, y2 - 0.12 * h),
+            (xc - 0.18 * w, y2 - 0.08 * h),
+            (xc + 0.18 * w, y2 - 0.08 * h),
+        ]
+        return core_pts, lane_pts
+
     def get_vehicle_zone(self, vehicle_bbox: Union[List[float], np.ndarray]) -> Optional[str]:
         """
-        Determines which spatial zone the vehicle's bottom-center contact point occupies:
+        Determines which spatial zone the vehicle's lower footprint occupies:
         'exit_zone', 'intersection', 'approach_lane', or None.
         """
-        x_center = (float(vehicle_bbox[0]) + float(vehicle_bbox[2])) / 2.0
-        y_bottom = float(vehicle_bbox[3])
-        point = (x_center, y_bottom)
+        core_pts, lane_pts = self._get_footprint_points(vehicle_bbox)
 
-        if self._point_in_polygons(point, self.exit_zones):
+        if any(self._point_in_polygons(p, self.exit_zones) for p in core_pts):
             return 'exit_zone'
-        if self._point_in_polygons(point, self.intersection):
+        if any(self._point_in_polygons(p, self.intersection) for p in core_pts):
             return 'intersection'
-        if self._point_in_polygons(point, self.lanes):
+        if any(self._point_in_polygons(p, self.lanes) for p in lane_pts):
             return 'approach_lane'
         return None
 
@@ -130,75 +152,74 @@ class ZoneChecker:
         if frame_number != self._last_light_update_frame and frame_number > 0:
             self.update_light_state('red' if light_is_red else 'green', frame_number, fps)
 
-        zone = self.get_vehicle_zone(vehicle_bbox)
-        bottom_center = (
-            (float(vehicle_bbox[0]) + float(vehicle_bbox[2])) / 2.0,
-            float(vehicle_bbox[3]),
-        )
-
-        # 1. Standard mode (immediate red enforcement)
-        if not self.crossing_mode:
-            if zone == 'approach_lane':
-                self._seen_in_lane[vehicle_id] = True
-                if light_is_red:
-                    self._seen_in_lane_during_red[vehicle_id] = True
-                return False
-
-            if zone in ('intersection', 'exit_zone'):
-                if self._entered_intersection.get(vehicle_id, False):
-                    return False
-                if self._seen_in_lane.get(vehicle_id, False):
-                    self._entered_intersection[vehicle_id] = True
-                    self._entry_light_state[vehicle_id] = 'red' if light_is_red else 'green'
-                    if light_is_red and vehicle_id not in self._violation_reported:
-                        self._violation_reported[vehicle_id] = True
-                        return True
+        # Early-exit so a legal crosser or flagged violator never flips state due to bbox jitter
+        if self._violation_reported.get(vehicle_id, False) or self._legal_crosser.get(vehicle_id, False):
             return False
 
-        # 2. 3/4-Way Multi-Lane Crossing Mode (3s Clearance + Exit Zone / Idle Box Trigger)
+        zone = self.get_vehicle_zone(vehicle_bbox)
         in_clearance = self.is_in_clearance(frame_number)
         effective_red = bool(light_is_red and not in_clearance)
 
         if zone == 'approach_lane':
             self._seen_in_lane[vehicle_id] = True
-            self._last_lane_frame[vehicle_id] = frame_number
-            self._seen_in_lane_during_red[vehicle_id] = effective_red
+            if effective_red:
+                self._seen_in_lane_during_red[vehicle_id] = True
             return False
 
-        if self._legal_crosser.get(vehicle_id, False) or self._violation_reported.get(vehicle_id, False):
+        # 1. Split-Phase Signal (Require Exit Zone) mode
+        if self.crossing_mode and len(self.exit_zones) > 0:
+            if zone == 'intersection':
+                if not effective_red:
+                    self._legal_crosser[vehicle_id] = True
+                    return False
+                if (
+                    self.clearance_seconds > 0
+                    and self._seen_in_lane.get(vehicle_id, False)
+                    and not self._seen_in_lane_during_red.get(vehicle_id, False)
+                ):
+                    self._legal_crosser[vehicle_id] = True
+                    return False
+                self._entered_intersection[vehicle_id] = True
+                self._intersection_red_frames[vehicle_id] = (
+                    self._intersection_red_frames.get(vehicle_id, 0) + 1
+                )
+                return False
+
+            if zone == 'exit_zone':
+                if not effective_red:
+                    self._legal_crosser[vehicle_id] = True
+                    return False
+                if (
+                    self._seen_in_lane_during_red.get(vehicle_id, False)
+                    or self._intersection_red_frames.get(vehicle_id, 0) >= 2
+                ):
+                    self._violation_reported[vehicle_id] = True
+                    return True
+                return False
+
             return False
 
-        if zone == 'intersection':
-            if not self._seen_in_lane_during_red.get(vehicle_id, False):
-                # Left the Approach Lane while GREEN or during the 3.0s clearance window
+        # 2. Standard Stop-Line mode
+        if zone in ('intersection', 'exit_zone'):
+            if not effective_red:
                 self._legal_crosser[vehicle_id] = True
                 return False
 
-            self._entered_intersection[vehicle_id] = True
-            self._intersection_frames[vehicle_id] = self._intersection_frames.get(vehicle_id, 0) + 1
-            pts = self._recent_intersection_pts.setdefault(vehicle_id, deque(maxlen=25))
-            pts.append(bottom_center)
+            if self._seen_in_lane.get(vehicle_id, False):
+                if (
+                    self.clearance_seconds > 0
+                    and not self._seen_in_lane_during_red.get(vehicle_id, False)
+                ):
+                    self._legal_crosser[vehicle_id] = True
+                    return False
 
-            # Without Exit Zones, require >= 2 frames inside intersection during effective_red (jitter guard)
-            if len(self.exit_zones) == 0:
-                if effective_red and self._intersection_frames[vehicle_id] >= 2:
+                self._entered_intersection[vehicle_id] = True
+                self._intersection_red_frames[vehicle_id] = (
+                    self._intersection_red_frames.get(vehicle_id, 0) + 1
+                )
+                if zone == 'exit_zone' or self._intersection_red_frames[vehicle_id] >= 2:
                     self._violation_reported[vehicle_id] = True
                     return True
-                return False
-
-            # With Exit Zones (Turn Green / All-Red Blocking): check if vehicle is standing idle inside box
-            if effective_red and self._intersection_frames[vehicle_id] >= 22 and len(pts) >= 16:
-                prev_pt = pts[-16]
-                disp = math.hypot(bottom_center[0] - prev_pt[0], bottom_center[1] - prev_pt[1])
-                if disp < 14.0:
-                    self._violation_reported[vehicle_id] = True
-                    return True
-            return False
-
-        if zone == 'exit_zone':
-            if self._seen_in_lane_during_red.get(vehicle_id, False) and effective_red:
-                self._violation_reported[vehicle_id] = True
-                return True
 
         return False
 
@@ -209,10 +230,7 @@ class ZoneChecker:
         self._last_light_update_frame = -1
         self._seen_in_lane.clear()
         self._seen_in_lane_during_red.clear()
-        self._last_lane_frame.clear()
         self._entered_intersection.clear()
+        self._intersection_red_frames.clear()
         self._legal_crosser.clear()
-        self._intersection_frames.clear()
-        self._recent_intersection_pts.clear()
-        self._entry_light_state.clear()
         self._violation_reported.clear()

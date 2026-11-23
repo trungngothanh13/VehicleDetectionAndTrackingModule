@@ -93,7 +93,7 @@ class TrafficPipeline:
                 f"{len(new_zone_checker.intersection)} intersection pts, "
                 f"{len(new_zone_checker.exit_zones)} exit zone(s), "
                 f"{light_count} light point(s), "
-                f"crossing_mode={new_zone_checker.crossing_mode} ({new_zone_checker.clearance_seconds}s grace)"
+                f"split_phase={new_zone_checker.crossing_mode}, clearance={new_zone_checker.clearance_seconds}s"
             )
         except Exception as e:
             print(f"[{self.camera_id}] Error reloading zones from {zones_file}: {e}")

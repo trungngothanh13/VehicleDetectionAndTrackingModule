@@ -558,7 +558,7 @@ class WebSocketSink(BaseSink):
             raw_clearance = zones_cfg.get("clearanceSeconds")
             if raw_clearance is None:
                 raw_clearance = zones_cfg.get("clearance_seconds")
-            clearance_seconds = float(raw_clearance if raw_clearance is not None else 3.0)
+            clearance_seconds = float(raw_clearance if raw_clearance is not None else 0.0)
 
             payload = {
                 "lanes": lanes,
