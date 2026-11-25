@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Disposable Multi-Object Tracker Benchmark Script for Thesis Section 6.2.
+Disposable Table 6.6 / Section 6.2 Benchmark Script for Thesis Evaluation.
 
-Benchmarks ByteTrack, BoT-SORT, and DeepSORT across every video in `videotemp/`
-using identical YOLO detector weights, frame resolution, and optional zone configs,
-and exports a single thesis-ready Markdown report (`tracker_benchmark_report.md`).
+By default, runs the fine-tuned YOLO model (`weights/best.pt`) with `ByteTrack`
+across every video in `videotemp/`, saves annotated H.264 videos with a compact
+benchmark HUD stat overlay (`output/benchmark/<stem>_<tracker>.mp4`), and exports
+a single thesis-ready Markdown report (`table66_benchmark_report.md`) containing
+Table 6.6 metrics, signal cycle timelines, and a per-event TP/FP checklist.
 
 Usage on Thunder Compute (zero-arg default):
     python benchmark_trackers.py
 
 Optional examples:
-    python benchmark_trackers.py --legacy
-    python benchmark_trackers.py --save-videos --print-md
+    python benchmark_trackers.py --trackers bytetrack botsort deepsort
+    python benchmark_trackers.py --no-save-videos --print-md
     python benchmark_trackers.py --video-dir videotemp --zones output/zones/cam-01.json
 """
 
@@ -21,7 +23,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import math
 import os
+import shutil
 import statistics
+import subprocess
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,9 +55,19 @@ class VideoMeta:
 
 
 @dataclass
+class SignalInterval:
+    state: str
+    start_frame: int
+    end_frame: int
+    start_sec: float
+    end_sec: float
+
+
+@dataclass
 class ViolationRecord:
     frame: int
     timestamp: str
+    time_mmss: str
     track_id: int
     vehicle_class: str
     light_state: str
@@ -65,6 +79,7 @@ class TrackerRunResult:
     tracker: str
     video_name: str
     evaluated_frames: int
+    duration_sec: float
     runtime_sec: float
     avg_fps: float
     mean_latency_ms: float
@@ -81,13 +96,21 @@ class TrackerRunResult:
     short_track_ratio_pct: float
     per_class_track_ids: Dict[str, int] = field(default_factory=dict)
     has_zones: bool = False
+    red_frames: int = 0
+    green_frames: int = 0
+    unknown_frames: int = 0
+    green_to_red_transitions: int = 0
+    red_to_green_transitions: int = 0
+    signal_intervals: List[SignalInterval] = field(default_factory=list)
+    legal_crosser_ids: int = 0
+    approach_lane_ids: int = 0
     violations: List[ViolationRecord] = field(default_factory=list)
     annotated_video_path: Optional[str] = None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark ByteTrack, BoT-SORT, and DeepSORT for VDAT Thesis Section 6.2"
+        description="Benchmark VDAT (Trained YOLO26l + ByteTrack by default) for Thesis Table 6.6 & Section 6.2"
     )
     parser.add_argument(
         "--video-dir",
@@ -110,9 +133,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--trackers",
         nargs="+",
-        default=["bytetrack", "botsort", "deepsort"],
+        default=["bytetrack"],
         choices=["bytetrack", "botsort", "deepsort"],
-        help="Trackers to benchmark in order (default: bytetrack botsort deepsort)",
+        help="Trackers to benchmark in order (default: bytetrack)",
     )
     parser.add_argument(
         "--model",
@@ -155,14 +178,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--save-videos",
         action="store_true",
-        help="Save annotated MP4s under output/benchmark/ for manual TP verification",
+        default=True,
+        help="Save annotated MP4s under output/benchmark/ (enabled by default)",
+    )
+    parser.add_argument(
+        "--no-save-videos",
+        action="store_false",
+        dest="save_videos",
+        help="Disable saving annotated MP4 benchmark videos",
     )
     parser.add_argument(
         "--output",
         "-o",
         type=str,
-        default="tracker_benchmark_report.md",
-        help="Output Markdown file path (default: tracker_benchmark_report.md)",
+        default="table66_benchmark_report.md",
+        help="Output Markdown file path (default: table66_benchmark_report.md)",
     )
     parser.add_argument(
         "--print-md",
@@ -222,6 +252,163 @@ def format_duration_human(seconds: float) -> str:
     mins = int(seconds // 60)
     secs = seconds - mins * 60
     return f"{seconds:.1f} s ({mins} min {secs:04.1f} s)"
+
+
+def format_mmss(seconds: float) -> str:
+    mins = int(seconds // 60)
+    rem = seconds - mins * 60
+    return f"{mins:02d}:{rem:05.2f}"
+
+
+def draw_benchmark_hud(
+    frame: Any,
+    video_name: str,
+    tracker_name: str,
+    frame_idx: int,
+    total_frames: int,
+    fps: float,
+    light_state: str,
+    g2r_count: int,
+    active_vehicles: int,
+    total_ids: int,
+    violation_count: int,
+    latest_alert: Optional[Tuple[int, str]] = None,
+) -> Any:
+    """Renders a compact benchmark-only HUD overlay onto exported verification videos."""
+    import cv2
+
+    h, w = frame.shape[:2]
+    panel_w = min(360, max(240, w - 16))
+    panel_h = 98
+    x0, y0 = 10, 10
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (15, 20, 28), -1)
+    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), (70, 90, 115), 1)
+
+    disp = TRACKER_DISPLAY.get(tracker_name, tracker_name)
+    sec = frame_idx / max(fps, 1.0)
+    total_lbl = str(total_frames) if total_frames > 0 else "?"
+    light_upper = str(light_state or "unknown").upper()
+    light_color = (
+        (60, 75, 255)
+        if light_upper == "RED"
+        else (80, 230, 110)
+        if light_upper == "GREEN"
+        else (180, 185, 195)
+    )
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(
+        frame,
+        f"Source: {video_name}  |  {disp}",
+        (x0 + 10, y0 + 22),
+        font,
+        0.48,
+        (235, 240, 248),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        f"Frame: {frame_idx}/{total_lbl}  |  Time: {format_mmss(sec)} ({sec:.2f}s)",
+        (x0 + 10, y0 + 44),
+        font,
+        0.45,
+        (200, 215, 235),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        f"Signal: {light_upper}",
+        (x0 + 10, y0 + 66),
+        font,
+        0.48,
+        light_color,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        f"|  G->R Cycles: {g2r_count}",
+        (x0 + 145, y0 + 66),
+        font,
+        0.45,
+        (200, 215, 235),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        f"Active: {active_vehicles}  |  Track IDs: {total_ids}  |  Violations: {violation_count}",
+        (x0 + 10, y0 + 88),
+        font,
+        0.45,
+        (110, 145, 255) if violation_count > 0 else (210, 220, 230),
+        1,
+        cv2.LINE_AA,
+    )
+
+    if latest_alert is not None and (frame_idx - latest_alert[0]) <= int(round(max(fps, 1.0) * 2.0)):
+        banner_txt = latest_alert[1]
+        (tw, th), _ = cv2.getTextSize(banner_txt, font, 0.50, 1)
+        bx2 = w - 10
+        bx1 = max(x0 + panel_w + 10, bx2 - tw - 20)
+        by1, by2 = 10, 42
+        if bx1 < bx2 - 40:
+            cv2.rectangle(frame, (bx1, by1), (bx2, by2), (35, 35, 200), -1)
+            cv2.rectangle(frame, (bx1, by1), (bx2, by2), (160, 175, 255), 1)
+            cv2.putText(
+                frame,
+                banner_txt,
+                (bx1 + 10, by1 + 22),
+                font,
+                0.50,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+    return frame
+
+
+def _transcode_h264_faststart(raw_path: str) -> str:
+    """Re-encodes OpenCV mp4v output to H.264 (+faststart) when ffmpeg is installed."""
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin or not os.path.exists(raw_path):
+        return raw_path
+    tmp_path = f"{raw_path}.h264.tmp.mp4"
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        raw_path,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        tmp_path,
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if proc.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+            os.replace(tmp_path, raw_path)
+    except Exception:
+        pass
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    return raw_path
 
 
 def _sync_cuda(torch_mod: Any) -> None:
@@ -335,6 +522,17 @@ def benchmark_single_run(
     violations: List[ViolationRecord] = []
     violation_ids = set()
 
+    red_frames = 0
+    green_frames = 0
+    unknown_frames = 0
+    g2r_transitions = 0
+    r2g_transitions = 0
+    last_confirmed_signal: Optional[str] = None
+    signal_intervals: List[SignalInterval] = []
+    cur_sig_state: Optional[str] = None
+    cur_sig_start_frame = 1
+    latest_alert: Optional[Tuple[int, str]] = None
+
     has_cuda = bool(torch_mod is not None and torch_mod.cuda.is_available())
     if has_cuda:
         torch_mod.cuda.reset_peak_memory_stats()
@@ -342,6 +540,7 @@ def benchmark_single_run(
     t_run_start = time.perf_counter()
 
     frame_idx = 0
+    fps_val = video_meta.fps or 30.0
     try:
         while True:
             if max_frames > 0 and frame_idx >= max_frames:
@@ -368,9 +567,39 @@ def benchmark_single_run(
                     if tid not in track_class:
                         track_class[tid] = tracker.get_class_name(cid)
 
+            light_state = "unknown"
             if zone_checker is not None:
-                light_state = light_detector.detect(frame) if light_detector else "unknown"
-                zone_checker.update_light_state(light_state, frame_idx, video_meta.fps)
+                light_state = str(light_detector.detect(frame) if light_detector else "unknown").lower()
+                if light_state == "red":
+                    red_frames += 1
+                    if last_confirmed_signal == "green":
+                        g2r_transitions += 1
+                    last_confirmed_signal = "red"
+                elif light_state == "green":
+                    green_frames += 1
+                    if last_confirmed_signal == "red":
+                        r2g_transitions += 1
+                    last_confirmed_signal = "green"
+                else:
+                    unknown_frames += 1
+
+                if cur_sig_state is None:
+                    cur_sig_state = light_state
+                    cur_sig_start_frame = frame_idx
+                elif light_state != cur_sig_state:
+                    signal_intervals.append(
+                        SignalInterval(
+                            state=cur_sig_state,
+                            start_frame=cur_sig_start_frame,
+                            end_frame=frame_idx - 1,
+                            start_sec=(cur_sig_start_frame - 1) / fps_val,
+                            end_sec=(frame_idx - 1) / fps_val,
+                        )
+                    )
+                    cur_sig_state = light_state
+                    cur_sig_start_frame = frame_idx
+
+                zone_checker.update_light_state(light_state, frame_idx, fps_val)
                 if tracked.tracker_id is not None:
                     light_is_red = light_state == "red"
                     for i in range(len(tracked)):
@@ -384,7 +613,7 @@ def benchmark_single_run(
                             bbox,
                             light_is_red=light_is_red,
                             frame_number=frame_idx,
-                            fps=video_meta.fps,
+                            fps=fps_val,
                         ):
                             if tid not in violation_ids:
                                 violation_ids.add(tid)
@@ -393,15 +622,22 @@ def benchmark_single_run(
                                     if tracked.confidence is not None
                                     else None
                                 )
+                                v_cls = tracker.get_class_name(cid)
+                                sec_val = frame_idx / fps_val
                                 violations.append(
                                     ViolationRecord(
                                         frame=frame_idx,
-                                        timestamp=f"{frame_idx / video_meta.fps:.2f}s",
+                                        timestamp=f"{sec_val:.2f}s",
+                                        time_mmss=format_mmss(sec_val),
                                         track_id=tid,
-                                        vehicle_class=tracker.get_class_name(cid),
+                                        vehicle_class=v_cls,
                                         light_state=light_state,
                                         confidence=conf,
                                     )
+                                )
+                                latest_alert = (
+                                    frame_idx,
+                                    f"VIOLATION #{len(violations)}: {v_cls} #{tid} @ {sec_val:.1f}s",
                                 )
 
             if writer is not None and visualizer is not None:
@@ -421,6 +657,20 @@ def benchmark_single_run(
                     tracker,
                     violation_ids=violation_ids if zone_checker is not None else None,
                 )
+                vis_frame = draw_benchmark_hud(
+                    vis_frame,
+                    video_name=video_meta.filename,
+                    tracker_name=tracker_name,
+                    frame_idx=frame_idx,
+                    total_frames=video_meta.evaluated_frames or video_meta.total_frames,
+                    fps=fps_val,
+                    light_state=light_state,
+                    g2r_count=g2r_transitions,
+                    active_vehicles=num_active,
+                    total_ids=len(track_frames),
+                    violation_count=len(violations),
+                    latest_alert=latest_alert,
+                )
                 writer.write(vis_frame)
 
             latencies_ms.append((time.perf_counter() - t_frame_start) * 1000.0)
@@ -430,12 +680,27 @@ def benchmark_single_run(
                 cur_fps = frame_idx / elapsed_so_far if elapsed_so_far > 0 else 0.0
                 print(
                     f"  [{video_meta.filename} | {TRACKER_DISPLAY.get(tracker_name, tracker_name)}] "
-                    f"Frame {frame_idx} ({cur_fps:.1f} FPS, active={num_active}, ids={len(track_frames)})"
+                    f"Frame {frame_idx} ({cur_fps:.1f} FPS, active={num_active}, ids={len(track_frames)}, "
+                    f"violations={len(violations)})"
                 )
     finally:
         cap.release()
         if writer is not None:
             writer.release()
+
+    if annotated_path:
+        annotated_path = _transcode_h264_faststart(annotated_path)
+
+    if cur_sig_state is not None and frame_idx > 0:
+        signal_intervals.append(
+            SignalInterval(
+                state=cur_sig_state,
+                start_frame=cur_sig_start_frame,
+                end_frame=frame_idx,
+                start_sec=(cur_sig_start_frame - 1) / fps_val,
+                end_sec=frame_idx / fps_val,
+            )
+        )
 
     _sync_cuda(torch_mod)
     total_runtime = max(1e-6, time.perf_counter() - t_run_start)
@@ -451,11 +716,22 @@ def benchmark_single_run(
     short_ratio = (short_lt5 * 100.0 / total_ids) if total_ids > 0 else 0.0
     sorted_lat = sorted(latencies_ms)
     per_class_counts = dict(sorted(Counter(track_class.values()).items()))
+    legal_crosser_ids = (
+        sum(1 for flagged in zone_checker._legal_crosser.values() if flagged)
+        if zone_checker is not None
+        else 0
+    )
+    approach_lane_ids = (
+        sum(1 for seen in zone_checker._seen_in_lane.values() if seen)
+        if zone_checker is not None
+        else 0
+    )
 
     return TrackerRunResult(
         tracker=tracker_name,
         video_name=video_meta.filename,
         evaluated_frames=frame_idx,
+        duration_sec=(frame_idx / fps_val) if fps_val > 0 else video_meta.duration_sec,
         runtime_sec=total_runtime,
         avg_fps=(frame_idx / total_runtime) if total_runtime > 0 else 0.0,
         mean_latency_ms=statistics.mean(latencies_ms) if latencies_ms else 0.0,
@@ -472,6 +748,14 @@ def benchmark_single_run(
         short_track_ratio_pct=short_ratio,
         per_class_track_ids=per_class_counts,
         has_zones=(zone_checker is not None),
+        red_frames=red_frames,
+        green_frames=green_frames,
+        unknown_frames=unknown_frames,
+        green_to_red_transitions=g2r_transitions,
+        red_to_green_transitions=r2g_transitions,
+        signal_intervals=signal_intervals,
+        legal_crosser_ids=legal_crosser_ids,
+        approach_lane_ids=approach_lane_ids,
         violations=violations,
         annotated_video_path=annotated_path,
     )
@@ -489,61 +773,86 @@ def render_markdown_report(
     videos: List[VideoMeta],
     results: List[TrackerRunResult],
 ) -> str:
+    unique_trackers = list(dict.fromkeys(TRACKER_DISPLAY.get(r.tracker, r.tracker) for r in results))
     lines: List[str] = []
-    lines.append("# Section 6.2 Multi-Object Tracker Comparison Benchmark Report")
+    lines.append("# Table 6.6 End-to-End Red-Light Violation Evaluation Report")
     lines.append("")
     lines.append(f"- **Generated:** {generated_at}")
     lines.append(f"- **Hardware:** `{hardware_desc}` ({precision_desc})")
     lines.append(f"- **Detector Weights:** `{model_path}` (`profile={model_profile}`)")
+    lines.append(f"- **Trackers Run:** {', '.join(unique_trackers)}")
     lines.append(f"- **Active Vehicle Classes:** `{classes}`")
     lines.append(f"- **Inference Config:** `imgsz={imgsz}`, `conf={conf}`")
     lines.append(f"- **Videos Benchmarked:** {', '.join(v.filename for v in videos)}")
     lines.append("")
 
-    # 1. Input Videos Summary
-    lines.append("## 1. Benchmark Input Videos")
+    # 1. Input Videos & Signal Summary
+    lines.append("## 1. Benchmark Input Videos & Detected Signal Summary")
     lines.append("")
-    lines.append("| Video | Native Res | Eval Res | FPS | Eval Frames | Duration | Zone Config |")
-    lines.append("| :--- | :---: | :---: | ---: | ---: | ---: | :--- |")
+    lines.append("| Video | Eval Res | FPS | Frames | Duration | Zone Config | RED / GREEN / UNKNOWN Frames | Cycles (G->R / R->G) |")
+    lines.append("| :--- | :---: | ---: | ---: | ---: | :--- | :---: | :---: |")
     for v in videos:
-        zone_lbl = f"`{v.zones_path}`" if v.zones_path else "None (Tracking-only)"
-        eval_frames_actual = next(
-            (r.evaluated_frames for r in results if r.video_name == v.filename),
-            v.evaluated_frames,
-        )
-        dur = (eval_frames_actual / v.fps) if v.fps > 0 else v.duration_sec
+        r0 = next((r for r in results if r.video_name == v.filename), None)
+        zone_lbl = f"`{v.zones_path}`" if v.zones_path else "None"
+        eval_frames_actual = r0.evaluated_frames if r0 else v.evaluated_frames
+        dur = r0.duration_sec if r0 else ((eval_frames_actual / v.fps) if v.fps > 0 else v.duration_sec)
+        sig_split = f"{r0.red_frames} / {r0.green_frames} / {r0.unknown_frames}" if (r0 and r0.has_zones) else "N/A"
+        cyc_str = f"{r0.green_to_red_transitions} / {r0.red_to_green_transitions}" if (r0 and r0.has_zones) else "N/A"
         lines.append(
-            f"| `{v.filename}` | {v.native_width}x{v.native_height} | "
-            f"{v.eval_width}x{v.eval_height} | {v.fps:.1f} | {eval_frames_actual:,} | "
-            f"{dur:.1f} s | {zone_lbl} |"
+            f"| `{v.filename}` | {v.eval_width}x{v.eval_height} | {v.fps:.1f} | {eval_frames_actual:,} | "
+            f"{dur:.1f} s | {zone_lbl} | {sig_split} | {cyc_str} |"
         )
     lines.append("")
 
-    # 2. Section 6.2 Thesis Table
-    lines.append("## 2. Table 6.2 Summary (Ready for Thesis Section 6.2)")
+    # 2. Table 6.6 Thesis Summary
+    lines.append("## 2. Table 6.6 Summary (Ready for Manual TP / FP / FN Verification)")
     lines.append("")
     lines.append(
-        "> Fill **Verified True Positives** after inspecting the output or recorded violation events below."
+        "> Inspect the exported annotated video(s) below and verify each trigger in Section 5 to fill **Manual Legal / Violation Events**, **System TP / FP / FN**, and **Precision / Recall / F1 (%)**."
     )
     lines.append("")
     lines.append(
-        "| Tracker | Video | Runtime | Avg FPS | Avg Latency (ms) | Total Track IDs / Violations Recorded | Verified True Positives |"
+        "| Video (Tracker) | Duration / Signal Cycles | Approach-Lane Track IDs | System Violations Triggered | System Legal Crossers | Annotated Video | Manual Legal / Violations | TP / FP / FN | Precision / Recall / F1 (%) |"
     )
-    lines.append("| :--- | :--- | ---: | ---: | ---: | :---: | :--- |")
+    lines.append("| :--- | :---: | ---: | ---: | ---: | :--- | :--- | :--- | :--- |")
     for v in videos:
         vid_results = [r for r in results if r.video_name == v.filename]
         for r in vid_results:
             disp = TRACKER_DISPLAY.get(r.tracker, r.tracker)
-            viol_str = f"{len(r.violations)} violations" if r.has_zones else "N/A (no zones JSON)"
+            cyc_lbl = f"{r.duration_sec:.1f} s / {r.green_to_red_transitions} G->R"
+            vid_out = f"`{r.annotated_video_path}`" if r.annotated_video_path else "Not saved"
             lines.append(
-                f"| **{disp}** | `{r.video_name}` | {format_duration_human(r.runtime_sec)} | "
-                f"{r.avg_fps:.1f} FPS | {r.mean_latency_ms:.2f} ms | "
-                f"{r.total_track_ids:,} IDs / {viol_str} | [PENDING MANUAL VERIFICATION] |"
+                f"| `{r.video_name}` ({disp}) | {cyc_lbl} | {r.approach_lane_ids:,} | "
+                f"**{len(r.violations)}** | {r.legal_crosser_ids:,} | {vid_out} | "
+                f"[FILL] | [FILL] | [FILL] |"
             )
     lines.append("")
 
-    # 3. Detailed Runtime & Tracking Stability Metrics per Video
-    lines.append("## 3. Detailed Runtime, Latency & Track-Stability Metrics")
+    # 3. Signal Phase Timeline per Video
+    zoned_results = [r for r in results if r.has_zones]
+    if zoned_results:
+        lines.append("## 3. Detected Signal Phase Timelines (HSV Reference)")
+        lines.append("")
+        seen_vids = set()
+        for r in zoned_results:
+            if r.video_name in seen_vids:
+                continue
+            seen_vids.add(r.video_name)
+            lines.append(f"### `{r.video_name}`")
+            lines.append("")
+            lines.append("| # | Signal State | Frame Range | Timestamp Range | Duration |")
+            lines.append("| ---: | :--- | :---: | :---: | ---: |")
+            for idx, iv in enumerate(r.signal_intervals, start=1):
+                dur_s = max(0.0, iv.end_sec - iv.start_sec)
+                lines.append(
+                    f"| {idx} | **{iv.state.upper()}** | {iv.start_frame}–{iv.end_frame} | "
+                    f"{format_mmss(iv.start_sec)}–{format_mmss(iv.end_sec)} ({iv.start_sec:.2f}s–{iv.end_sec:.2f}s) | "
+                    f"{dur_s:.2f} s |"
+                )
+            lines.append("")
+
+    # 4. Detailed Runtime & Tracking Stability Metrics per Video
+    lines.append("## 4. Runtime, Latency & Track-Stability Metrics")
     lines.append("")
     class_names = sorted({c for r in results for c in r.per_class_track_ids.keys()})
 
@@ -551,23 +860,20 @@ def render_markdown_report(
         vid_results = [r for r in results if r.video_name == v.filename]
         if not vid_results:
             continue
-        slowest_time = max(r.runtime_sec for r in vid_results)
 
         lines.append(f"### Video: `{v.filename}`")
         lines.append("")
         lines.append(
-            "| Tracker | Runtime (s) | Speedup vs Slowest | Avg FPS | Mean / P50 / P95 (ms) | Peak VRAM | Total IDs | Avg / Peak Active | Mean / Med / Max Lifespan (frames) | Short Tracks (<5f) |"
+            "| Tracker | Runtime (s) | Avg FPS | Mean / P50 / P95 (ms) | Peak VRAM | Total IDs | Avg / Peak Active | Mean / Med / Max Lifespan (frames) | Short Tracks (<5f) |"
         )
         lines.append(
-            "| :--- | ---: | ---: | ---: | :---: | ---: | ---: | :---: | :---: | ---: |"
+            "| :--- | ---: | ---: | :---: | ---: | ---: | :---: | :---: | ---: |"
         )
         for r in vid_results:
             disp = TRACKER_DISPLAY.get(r.tracker, r.tracker)
-            speedup = ((slowest_time - r.runtime_sec) / slowest_time * 100.0) if slowest_time > 0 else 0.0
-            speed_str = "baseline" if abs(speedup) < 0.05 else f"+{speedup:.1f}% faster"
             vram_str = f"{r.peak_vram_mb:.1f} MB" if r.peak_vram_mb is not None else "N/A"
             lines.append(
-                f"| **{disp}** | {r.runtime_sec:.2f} s | {speed_str} | {r.avg_fps:.1f} | "
+                f"| **{disp}** | {r.runtime_sec:.2f} s | {r.avg_fps:.1f} | "
                 f"{r.mean_latency_ms:.2f} / {r.p50_latency_ms:.2f} / {r.p95_latency_ms:.2f} | "
                 f"{vram_str} | {r.total_track_ids:,} | "
                 f"{r.avg_active_vehicles:.1f} / {r.peak_active_vehicles} | "
@@ -589,59 +895,25 @@ def render_markdown_report(
                 lines.append(f"| **{disp}** | {vals} | {r.total_track_ids:,} |")
             lines.append("")
 
-    # 4. Auto-Computed Comparison Highlights
-    lines.append("## 4. Comparison Highlights (For Section 6.2 Analysis)")
-    lines.append("")
-    for v in videos:
-        vid_results = [r for r in results if r.video_name == v.filename]
-        if len(vid_results) < 2:
-            continue
-        fastest = min(vid_results, key=lambda r: r.runtime_sec)
-        slowest = max(vid_results, key=lambda r: r.runtime_sec)
-        fewest_ids = min(vid_results, key=lambda r: r.total_track_ids)
-        most_ids = max(vid_results, key=lambda r: r.total_track_ids)
-        lowest_frag = min(vid_results, key=lambda r: r.short_track_ratio_pct)
-
-        speed_pct = (
-            (slowest.runtime_sec - fastest.runtime_sec) / slowest.runtime_sec * 100.0
-            if slowest.runtime_sec > 0
-            else 0.0
-        )
-        id_diff_pct = (
-            (most_ids.total_track_ids - fewest_ids.total_track_ids) / most_ids.total_track_ids * 100.0
-            if most_ids.total_track_ids > 0
-            else 0.0
-        )
-        lines.append(
-            f"- **`{v.filename}`:** Fastest tracker was **{TRACKER_DISPLAY.get(fastest.tracker, fastest.tracker)}** "
-            f"({fastest.avg_fps:.1f} FPS, {speed_pct:.1f}% faster than {TRACKER_DISPLAY.get(slowest.tracker, slowest.tracker)}). "
-            f"Fewest raw track IDs came from **{TRACKER_DISPLAY.get(fewest_ids.tracker, fewest_ids.tracker)}** "
-            f"({fewest_ids.total_track_ids:,} vs. {most_ids.total_track_ids:,} max, {id_diff_pct:.1f}% lower ID count). "
-            f"Lowest `<5`-frame fragmentation: **{TRACKER_DISPLAY.get(lowest_frag.tracker, lowest_frag.tracker)}** "
-            f"({lowest_frag.short_track_ratio_pct:.1f}%)."
-        )
-    lines.append("")
-
-    # 5. Violation Event Audit Log (if zones were active)
-    zoned_results = [r for r in results if r.has_zones]
+    # 5. Recorded Violation Audit Checklist
     if zoned_results:
-        lines.append("## 5. Recorded Violation Audit Log (For Manual TP Verification)")
+        lines.append("## 5. Per-Event Violation Verification Checklist")
         lines.append("")
         for r in zoned_results:
             disp = TRACKER_DISPLAY.get(r.tracker, r.tracker)
-            lines.append(f"### `{r.video_name}` — {disp} ({len(r.violations)} recorded)")
+            lines.append(f"### `{r.video_name}` — {disp} ({len(r.violations)} triggered)")
             lines.append("")
             if not r.violations:
                 lines.append("_No violations triggered._")
                 lines.append("")
                 continue
-            lines.append("| # | Frame | Time | Track ID | Class | Light | Confidence |")
-            lines.append("| ---: | ---: | ---: | ---: | :--- | :--- | ---: |")
+            lines.append("| # | Frame | Time (mm:ss / s) | Track ID | Class | Light | Confidence | Verdict (TP/FP) | Notes |")
+            lines.append("| ---: | ---: | :---: | ---: | :--- | :--- | ---: | :--- | :--- |")
             for idx, ev in enumerate(r.violations, start=1):
                 conf_str = f"{ev.confidence * 100:.1f}%" if ev.confidence is not None else "N/A"
                 lines.append(
-                    f"| {idx} | {ev.frame} | {ev.timestamp} | #{ev.track_id} | "
-                    f"{ev.vehicle_class} | {ev.light_state} | {conf_str} |"
+                    f"| {idx} | {ev.frame} | {ev.time_mmss} ({ev.timestamp}) | #{ev.track_id} | "
+                    f"{ev.vehicle_class} | {ev.light_state} | {conf_str} | [ ] TP / [ ] FP | |"
                 )
             lines.append("")
 
@@ -767,6 +1039,11 @@ def run_benchmark(args: argparse.Namespace) -> None:
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(report_md)
 
+    saved_vids = [r.annotated_video_path for r in results if r.annotated_video_path]
+    if saved_vids:
+        print("\n🎬 Saved annotated videos (with benchmark HUD overlay):")
+        for vp in saved_vids:
+            print(f"   - {vp}")
     print(f"\n📄 Saved Markdown benchmark report -> {args.output}")
     if args.print_md:
         print("\n" + report_md)
