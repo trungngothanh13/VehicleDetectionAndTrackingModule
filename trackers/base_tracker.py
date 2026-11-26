@@ -7,8 +7,6 @@ import time
 import numpy as np
 import supervision as sv
 
-from core.table67_logger import table67_logger  # TEMP TABLE 6.7 BENCHMARK
-
 
 class BatchModelRunner:
     """
@@ -179,12 +177,6 @@ class BatchModelRunner:
                         **self._predict_precision_kwargs,
                     )
                 gpu_ms = (time.perf_counter() - t0) * 1000.0
-                # TEMP TABLE 6.7 BENCHMARK
-                table67_logger.record_batch(
-                    active_streams=self._active_camera_count(),
-                    batch_size=len(frames),
-                    gpu_ms=gpu_ms,
-                )
                 self._batch_count += 1
                 self._batch_frames_sum += len(frames)
                 self._batch_gpu_ms_sum += gpu_ms

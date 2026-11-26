@@ -5,7 +5,6 @@ import numpy as np
 
 from core.events import FrameTelemetry, ViolationEvent
 from core.evidence_recorder import EvidenceRecorder
-from core.table67_logger import table67_logger  # TEMP TABLE 6.7 BENCHMARK
 from ingestion.base_reader import BaseFrameReader
 from spatial.zone_checker import ZoneChecker
 from traffic_light.traffic_light_detector import TrafficLightDetector
@@ -220,7 +219,6 @@ class TrafficPipeline:
                 raw_frame = None if self._raw_consumer_registered else frame.copy()
 
                 frame_count += 1
-                t_e2e_start = time.perf_counter()  # TEMP TABLE 6.7 BENCHMARK
                 now_mono = time.monotonic()
                 fps_window.append(now_mono)
                 if len(fps_window) >= 2 and (fps_window[-1] - fps_window[0]) > 0.05:
@@ -334,12 +332,6 @@ class TrafficPipeline:
                 for sink in self.sinks:
                     sink.on_frame(frame, telemetry)
 
-                # TEMP TABLE 6.7 BENCHMARK
-                table67_logger.record_camera_frame(
-                    camera_id=self.camera_id,
-                    e2e_ms=(time.perf_counter() - t_e2e_start) * 1000.0,
-                )
-
                 # Check if any preview sink requested exit
                 stop_requested = any(getattr(s, 'should_stop', False) for s in self.sinks)
                 if stop_requested:
@@ -367,7 +359,6 @@ class TrafficPipeline:
         print(f"Total Unique Vehicles:  {self.tracker.get_total_tracked()}")
         print(f"Total Violations:       {len(self.violation_events)}")
         print("=" * 60)
-        table67_logger.log_final_snapshot()  # TEMP TABLE 6.7 BENCHMARK
 
         return self.violation_events
 
